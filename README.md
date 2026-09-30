@@ -4,39 +4,46 @@ Turn a YouTube interview into five ranked, 15–30 second vertical clips. Choose
 
 ## Setup
 
-Requires Linux, Python 3.12+, Node.js 22+, and FFmpeg/ffprobe (`sudo apt install ffmpeg`).
+Supports Windows 10/11, macOS, and Linux. Install Python 3.12+, Node.js 22+, and an FFmpeg build containing both `ffmpeg` and `ffprobe`. Verify they are on `PATH`:
 
-From the repository root:
+```text
+python --version
+node --version
+ffmpeg -version
+ffprobe -version
+```
+
+Common installers:
+
+- macOS with Homebrew: `brew install python@3.12 node ffmpeg`
+- Windows with winget: `winget install Python.Python.3.12 OpenJS.NodeJS.LTS Gyan.FFmpeg`
+- Ubuntu/Debian: `sudo apt install python3 python3-venv ffmpeg`; install Node.js 22+ if the distribution package is older.
+
+On macOS or Linux, run from the repository root:
 
 ```bash
 python3 -m venv backend/.venv
-backend/.venv/bin/pip install -r backend/requirements.txt
+backend/.venv/bin/python -m pip install -r backend/requirements.txt
 cp backend/.env.example backend/.env
+cd frontend && npm ci && cd ..
+python3 start.py --check
+python3 start.py
+```
+
+On Windows PowerShell:
+
+```powershell
+py -3.12 -m venv backend/.venv
+backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+Copy-Item backend\.env.example backend\.env
+Set-Location frontend; npm ci; Set-Location ..
+py start.py --check
+py start.py
 ```
 
 Edit `backend/.env` and add the keys for the providers you want: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and/or `OPENAI_API_KEY`. Gemini is the default and the transcription fallback when a video has no YouTube captions. Never put keys in the frontend. `MAX_VIDEO_SECONDS` defaults to 7200.
 
-Start the backend from the repository root:
-
-```bash
-backend/.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
-
-In a second terminal:
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-After the one-time setup above, both servers can be started with one command from the repository root:
-
-```bash
-./start.sh
-```
-
-Press `Ctrl+C` to stop both servers.
+The Python launcher starts both servers and shuts down both process trees on `Ctrl+C`. If your Python command has a different name, use the same command that created `backend/.venv`.
 
 Open http://localhost:3000. Keep the backend running while a job processes. Use one backend process; do not add `--workers`. Avoid auto-reload during processing.
 
@@ -66,13 +73,20 @@ Use public videos you have permission to process. YouTube can block automated do
 
 ## Checks
 
+macOS/Linux:
+
 ```bash
 backend/.venv/bin/python -m unittest discover -s backend/tests -v
 backend/.venv/bin/python -m backend.tests.smoke_video
-cd frontend
-npm run lint
-npm run typecheck
-npm run build
+cd frontend && npm test && npm run lint && npm run typecheck && npm run build
+```
+
+Windows PowerShell:
+
+```powershell
+backend\.venv\Scripts\python.exe -m unittest discover -s backend/tests -v
+backend\.venv\Scripts\python.exe -m backend.tests.smoke_video
+Set-Location frontend; npm test; npm run lint; npm run typecheck; npm run build
 ```
 
 Automated API tests mock YouTube and AI providers. A real end-to-end run requires a valid key for the selected provider, quota, and an accessible YouTube video. Captionless videos also require Gemini. Provider errors appear in the interface; diagnostic details stay in backend logs.

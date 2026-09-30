@@ -126,7 +126,7 @@ def render_edit(sources: list[tuple[Path, VideoSegment]], target: Path, edit: Ed
     video_filters = f"[{video_label}]null"
     if edit.captions:
         _write_captions(caption_file, edit, width, height)
-        escaped = str(caption_file).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        escaped = caption_file.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
         video_filters += f",subtitles=filename='{escaped}'"
     filters.append(video_filters + "[vout]")
     if has_audio:
