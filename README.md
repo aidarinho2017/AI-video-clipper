@@ -51,7 +51,7 @@ Open http://localhost:3000. Keep the backend running while a job processes. Use 
 
 Browser → FastAPI background job → yt-dlp video and timestamped captions → selected AI model → validation/ranking → FFmpeg center crop → five MP4 files. If captions are unavailable, FFmpeg extracts audio and Gemini creates a timestamped transcript first.
 
-The standalone editor imports multiple local videos into a media bin. Add full sources to the timeline, split and trim clips, reframe each clip for a social aspect ratio, position captions directly in the preview, adjust audio, and export one MP4.
+The standalone editor imports multiple local videos and audio files. Add sources to the timeline, split and trim clips, mix waveform-backed audio tracks with per-clip volume and fades, add crossfades, reframe for social aspect ratios, position captions directly in the preview, and export one MP4.
 
 The backend requests 15 moments with timestamps, titles, reasoning and scores from the selected model. Every score ranges from 0 (weak/absent) to 100 (exceptional). Candidates must have finite source-relative timestamps and last 15–30 seconds. Ranking uses virality, standalone, hook, then earliest start; the greedy selector rejects overlapping moments. One additional request is allowed if fewer than five survive. The system fails clearly if it cannot select five valid moments.
 

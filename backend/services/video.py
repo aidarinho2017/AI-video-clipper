@@ -4,7 +4,7 @@ import math
 import subprocess
 from pathlib import Path
 
-from ..models import ClipCandidate, EditorExportRequest, PipelineError, VideoSegment
+from ..models import AudioClip, ClipCandidate, EditorExportRequest, PipelineError, VideoSegment
 
 log = logging.getLogger(__name__)
 
@@ -21,18 +21,39 @@ def run(args: list[str], timeout: int = 1800) -> str:
         raise PipelineError("Video processing failed. Check that the source contains playable video and audio.") from exc
 
 
-def probe_media(path: Path) -> dict:
+def probe_source(path: Path) -> dict:
     info = json.loads(run(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], 30))
     streams = info.get("streams", [])
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
-    duration = float(info["format"]["duration"])
-    if not video_stream or not math.isfinite(duration) or duration <= 0:
-        raise PipelineError("The source must contain playable video with a valid duration.")
+    audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    duration = float(info.get("format", {}).get("duration", 0))
+    if not (video_stream or audio_stream) or not math.isfinite(duration) or duration <= 0:
+        raise PipelineError("The source must contain playable video or audio with a valid duration.")
+    result = {"duration": duration, "kind": "video" if video_stream else "audio",
+              "has_audio": audio_stream is not None}
+    if not video_stream:
+        return result
     width, height = int(video_stream.get("width", 0)), int(video_stream.get("height", 0))
     if width <= 0 or height <= 0:
         raise PipelineError("Could not determine the source video dimensions.")
-    return {"duration": duration, "width": width, "height": height,
-            "has_audio": any(stream.get("codec_type") == "audio" for stream in streams)}
+    return {**result, "width": width, "height": height}
+
+
+def probe_media(path: Path) -> dict:
+    metadata = probe_source(path)
+    if metadata["kind"] != "video":
+        raise PipelineError("The source must contain playable video with a valid duration.")
+    return metadata
+
+
+def normalize_audio(source: Path, target: Path):
+    run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(source), "-vn", "-ar", "48000",
+         "-ac", "2", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(target)])
+
+
+def render_waveform(source: Path, target: Path):
+    run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(source), "-filter_complex",
+         "aformat=channel_layouts=mono,showwavespic=s=2000x80:colors=7ea0ff", "-frames:v", "1", str(target)], 120)
 
 
 def probe(path: Path) -> float:
@@ -92,11 +113,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
 
 
-def render_edit(sources: list[tuple[Path, VideoSegment]], target: Path, edit: EditorExportRequest):
+def render_edit(sources: list[tuple[Path, VideoSegment]], audio_sources: list[tuple[Path, AudioClip]],
+                target: Path, edit: EditorExportRequest):
     width, height = RESOLUTIONS[edit.aspect_ratio]
     filters = []
     metadata = [probe_media(path) for path, _ in sources]
-    has_audio = any(value["has_audio"] for value in metadata)
+    has_linked_audio = any(value["has_audio"] for value in metadata)
     for index, ((_, segment), source_metadata) in enumerate(zip(sources, metadata)):
         start, end = segment.source_start, segment.source_end
         scale = segment.transform.scale
@@ -104,23 +126,63 @@ def render_edit(sources: list[tuple[Path, VideoSegment]], target: Path, edit: Ed
                         f"h='ceil(ih*max({width}/iw\\,{height}/ih)*{scale}/2)*2'")
         crop = (f"crop={width}:{height}:(in_w-out_w)*({segment.transform.position_x}+1)/2:"
                 f"(in_h-out_h)*({segment.transform.position_y}+1)/2,setsar=1")
-        filters.append(f"[{index}:v]trim=start={start}:end={end},setpts=PTS-STARTPTS,{scale_filter},{crop},fps=30,format=yuv420p[v{index}]")
-        if has_audio:
+        filters.append(f"[{index}:v]trim=start={start}:end={end},setpts=PTS-STARTPTS,{scale_filter},{crop},fps=30,settb=AVTB,format=yuv420p[v{index}]")
+        if has_linked_audio:
+            duration = end - start
+            audio = segment.audio
+            effects = f",volume={0 if audio.muted else audio.volume}"
+            if audio.fade_in:
+                effects += f",afade=t=in:st=0:d={audio.fade_in}"
+            if audio.fade_out:
+                effects += f",afade=t=out:st={duration - audio.fade_out}:d={audio.fade_out}"
             if source_metadata["has_audio"]:
-                filters.append(f"[{index}:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}]")
+                filters.append(f"[{index}:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo{effects}[a{index}]")
             else:
-                filters.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={end - start},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}]")
+                filters.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={duration},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:channel_layouts=stereo{effects}[a{index}]")
 
-    if len(edit.segments) == 1:
-        video_label, audio_label = "v0", "a0"
-    elif has_audio:
-        inputs = "".join(f"[v{i}][a{i}]" for i in range(len(edit.segments)))
-        filters.append(f"{inputs}concat=n={len(edit.segments)}:v=1:a=1[vcat][acat]")
-        video_label, audio_label = "vcat", "acat"
-    else:
-        inputs = "".join(f"[v{i}]" for i in range(len(edit.segments)))
-        filters.append(f"{inputs}concat=n={len(edit.segments)}:v=1:a=0[vcat]")
-        video_label, audio_label = "vcat", ""
+    video_label, audio_label = "v0", "a0"
+    combined_duration = edit.segments[0].source_end - edit.segments[0].source_start
+    for index, segment in enumerate(edit.segments[1:], 1):
+        transition = segment.transition_duration
+        next_video, next_audio = f"vjoin{index}", f"ajoin{index}"
+        if transition:
+            filters.append(
+                f"[{video_label}][v{index}]xfade=transition=fade:duration={transition}:"
+                f"offset={combined_duration - transition}[{next_video}]"
+            )
+            if has_linked_audio:
+                filters.append(f"[{audio_label}][a{index}]acrossfade=d={transition}[{next_audio}]")
+        else:
+            if has_linked_audio:
+                filters.append(
+                    f"[{video_label}][{audio_label}][v{index}][a{index}]"
+                    f"concat=n=2:v=1:a=1[{next_video}][{next_audio}]"
+                )
+            else:
+                filters.append(f"[{video_label}][v{index}]concat=n=2:v=1:a=0[{next_video}]")
+        video_label = next_video
+        if has_linked_audio:
+            audio_label = next_audio
+        combined_duration += segment.source_end - segment.source_start - transition
+
+    mix_labels = [audio_label] if has_linked_audio else []
+    for index, (_, clip) in enumerate(audio_sources):
+        input_index = len(sources) + index
+        duration = clip.source_end - clip.source_start
+        audio = clip.audio
+        effects = f",volume={0 if audio.muted else audio.volume}"
+        if audio.fade_in:
+            effects += f",afade=t=in:st=0:d={audio.fade_in}"
+        if audio.fade_out:
+            effects += f",afade=t=out:st={duration - audio.fade_out}:d={audio.fade_out}"
+        label = f"extra{index}"
+        delay = round(clip.timeline_start * 1000)
+        filters.append(
+            f"[{input_index}:a]atrim=start={clip.source_start}:end={clip.source_end},"
+            f"asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+            f"{effects},adelay={delay}:all=1[{label}]"
+        )
+        mix_labels.append(label)
 
     caption_file = target.parent / "captions.ass"
     video_filters = f"[{video_label}]null"
@@ -129,19 +191,25 @@ def render_edit(sources: list[tuple[Path, VideoSegment]], target: Path, edit: Ed
         escaped = caption_file.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
         video_filters += f",subtitles=filename='{escaped}'"
     filters.append(video_filters + "[vout]")
-    if has_audio:
+    if mix_labels:
+        mixed = mix_labels[0]
+        if len(mix_labels) > 1:
+            inputs = "".join(f"[{label}]" for label in mix_labels)
+            filters.append(f"{inputs}amix=inputs={len(mix_labels)}:duration=longest:normalize=0[amixed]")
+            mixed = "amixed"
         volume = 0 if edit.audio.muted else edit.audio.volume
-        filters.append(f"[{audio_label}]volume={volume}[aout]")
+        filters.append(f"[{mixed}]apad=pad_dur={combined_duration},atrim=duration={combined_duration},"
+                       f"volume={volume},alimiter=limit=0.95[aout]")
 
     temporary = target.with_suffix(".partial.mp4")
     args = ["ffmpeg", "-nostdin", "-y", "-v", "error"]
-    for source, _ in sources:
+    for source, _ in sources + audio_sources:
         args += ["-i", str(source)]
     args += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
-    if has_audio:
+    if mix_labels:
         args += ["-map", "[aout]"]
     args += ["-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p"]
-    if has_audio:
+    if mix_labels:
         args += ["-c:a", "aac", "-b:a", "128k"]
     args += ["-movflags", "+faststart", str(temporary)]
     try:

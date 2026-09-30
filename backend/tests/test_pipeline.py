@@ -95,15 +95,27 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(jobs.read(queued["id"])["status"], "failed")
 
     def test_editor_api_lifecycle(self):
-        metadata = {"duration": 12.0, "width": 640, "height": 360, "has_audio": True}
+        metadata = {"kind": "video", "duration": 12.0, "width": 640, "height": 360, "has_audio": True}
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(settings, "max_upload_bytes", 100):
-            def fake_render(sources, target, edit):
+            def fake_render(sources, audio_sources, target, edit):
                 target.write_bytes(b"edited")
-            with patch("backend.services.video.probe_media", return_value=metadata), patch("backend.services.video.render_edit", side_effect=fake_render), TestClient(app) as client:
+            with patch("backend.services.video.probe_source", return_value=metadata), patch("backend.services.video.probe_media", return_value=metadata), patch("backend.services.video.render_edit", side_effect=fake_render), TestClient(app) as client:
                 uploaded = client.post("/editor/sources", content=b"video", headers={"Content-Type": "video/mp4"})
                 self.assertEqual(uploaded.status_code, 201)
                 source_id = uploaded.json()["id"]
                 self.assertEqual(client.get(f"/editor/sources/{source_id}").content, b"video")
+                def fake_waveform(source, target):
+                    target.write_bytes(b"png")
+                with patch("backend.services.video.render_waveform", side_effect=fake_waveform):
+                    self.assertEqual(client.get(f"/editor/sources/{source_id}/waveform").content, b"png")
+                audio_metadata = {"kind": "audio", "duration": 8.0, "has_audio": True}
+                def fake_normalize(source, target):
+                    target.write_bytes(b"normalized")
+                with patch("backend.services.video.probe_source", return_value=audio_metadata), patch("backend.services.video.normalize_audio", side_effect=fake_normalize):
+                    audio_upload = client.post("/editor/sources", content=b"audio", headers={"Content-Type": "audio/wav"})
+                self.assertEqual(audio_upload.status_code, 201)
+                self.assertEqual(audio_upload.json()["kind"], "audio")
+                self.assertEqual(client.get(f"/editor/sources/{audio_upload.json()['id']}").content, b"normalized")
                 edit = {
                     "segments": [{"id": "00000000-0000-0000-0000-000000000001", "source": {"kind": "upload", "id": source_id}, "source_start": 1, "source_end": 4, "transform": {"scale": 1.2, "position_x": 0.2, "position_y": -0.1}}],
                     "aspect_ratio": "1:1",
@@ -132,6 +144,31 @@ class PipelineTests(unittest.TestCase):
             EditorExportRequest.model_validate({**base, "captions": [
                 {"id": "00000000-0000-0000-0000-000000000003", "start": 0, "end": 1, "text": "Outside", "position_x": 1},
             ]})
+        second = {**base["segments"][0], "id": "00000000-0000-0000-0000-000000000003"}
+        with self.assertRaisesRegex(ValueError, "first segment"):
+            EditorExportRequest.model_validate({"segments": [{**base["segments"][0], "transition_duration": 0.5}, second]})
+        with self.assertRaisesRegex(ValueError, "at least 0.1"):
+            EditorExportRequest.model_validate({"segments": [base["segments"][0], {**second, "transition_duration": 0.05}]})
+        with self.assertRaisesRegex(ValueError, "too long"):
+            EditorExportRequest.model_validate({"segments": [base["segments"][0], {**second, "transition_duration": 1.5}]})
+        audio_clip = {"id": "00000000-0000-0000-0000-000000000004", "source": base["segments"][0]["source"],
+                      "timeline_start": 0, "source_start": 0, "source_end": 1}
+        with self.assertRaisesRegex(ValueError, "cannot overlap"):
+            EditorExportRequest.model_validate({**base, "audio_tracks": [{
+                "id": "00000000-0000-0000-0000-000000000005", "name": "Music", "clips": [
+                    audio_clip, {**audio_clip, "id": "00000000-0000-0000-0000-000000000006", "timeline_start": 0.5},
+                ],
+            }]})
+        with self.assertRaisesRegex(ValueError, "fades cannot exceed"):
+            EditorExportRequest.model_validate({**base, "audio_tracks": [{
+                "id": "00000000-0000-0000-0000-000000000005", "name": "Music",
+                "clips": [{**audio_clip, "audio": {"fade_in": 0.8, "fade_out": 0.8}}],
+            }]})
+        with self.assertRaisesRegex(ValueError, "after the video"):
+            EditorExportRequest.model_validate({**base, "audio_tracks": [{
+                "id": "00000000-0000-0000-0000-000000000005", "name": "Music",
+                "clips": [{**audio_clip, "timeline_start": 3}],
+            }]})
 
     def test_caption_json(self):
         self.assertEqual(youtube._caption({"language": "en", "subtitles": {"en": []},

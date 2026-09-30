@@ -5,18 +5,33 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   MIN_CAPTION_DURATION,
+  MIN_TRANSITION_DURATION,
+  type AudioClip,
+  audioClipDuration,
+  audioGainAt,
+  clipAudioGain,
   clamp,
   type Caption,
   deleteSegment,
+  deleteAudioClip,
   type EditorState,
   type EditorSource,
   formatTime,
   pixelsToTime,
+  projectLayers,
   projectToSource,
+  segmentStarts,
+  setTransition,
+  splitAudioClip,
   splitAt,
   timeToPixels,
   timelineDuration,
+  transitionLimit,
+  trimAudioClip,
   trimSegment,
+  moveAudioClip,
+  removeAudioTimelineRange,
+  insertAudioTimelineTime,
   type VideoSegment,
 } from "./editor-state";
 
@@ -24,9 +39,10 @@ const API = "http://localhost:8000";
 const OUTPUT_HEIGHT = { "9:16": 1280, "16:9": 720, "1:1": 720 } as const;
 
 type SourceMetadata = {
+  kind: "video" | "audio";
   duration: number;
-  width: number;
-  height: number;
+  width?: number;
+  height?: number;
   has_audio: boolean;
 };
 
@@ -47,15 +63,27 @@ type Drag = {
   editor: EditorState;
 };
 
+type AudioDrag = {
+  startX: number;
+  width: number;
+  duration: number;
+  mode: "move" | "start" | "end";
+  clip: AudioClip;
+  editor: EditorState;
+  sourceDuration: number;
+};
+
 const defaultTransform = () => ({ scale: 1, positionX: 0, positionY: 0 });
+const defaultClipAudio = () => ({ volume: 1, muted: false, fadeIn: 0, fadeOut: 0 });
 
 function initialEditor(mediaId: string, start: number, end: number): EditorState {
   return {
-    segments: [{ id: crypto.randomUUID(), mediaId, sourceStart: start, sourceEnd: end, transform: defaultTransform() }],
+    segments: [{ id: crypto.randomUUID(), mediaId, sourceStart: start, sourceEnd: end, transitionDuration: 0, transform: defaultTransform(), audio: defaultClipAudio() }],
     aspectRatio: "9:16",
     captions: [],
     captionStyle: { preset: "classic", fontSize: 36 },
     audio: { volume: 1, muted: false },
+    audioTracks: [],
   };
 }
 
@@ -67,24 +95,34 @@ async function jsonRequest(path: string, options?: RequestInit) {
   return data;
 }
 
+function waveformUrl(item?: MediaItem) {
+  if (!item?.metadata?.has_audio) return "";
+  return item.source.kind === "upload"
+    ? `${API}/editor/sources/${item.source.id}/waveform`
+    : `${API}/editor/jobs/${item.source.jobId}/waveform`;
+}
+
 export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clipIndex?: number }) {
-  const video = useRef<HTMLVideoElement>(null);
+  const videos = useRef(new Map<number, HTMLVideoElement>());
+  const audios = useRef(new Map<string, HTMLAudioElement>());
   const timeline = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
-  const activeSegment = useRef(0);
   const frame = useRef(0);
-  const pendingSeek = useRef<number | null>(null);
   const playIntent = useRef(false);
+  const playbackStart = useRef({ time: 0, wall: 0 });
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [media, setMedia] = useState<MediaItem[]>([]);
   const [playhead, setPlayhead] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selectedSegment, setSelectedSegment] = useState("");
+  const [selectedTransition, setSelectedTransition] = useState<number | null>(null);
   const [selectedCaption, setSelectedCaption] = useState("");
+  const [selectedAudio, setSelectedAudio] = useState("");
   const [timelineWidth, setTimelineWidth] = useState(0);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [drag, setDrag] = useState<Drag | null>(null);
+  const [audioDrag, setAudioDrag] = useState<AudioDrag | null>(null);
   const [cropDrag, setCropDrag] = useState<{ x: number; y: number; positionX: number; positionY: number } | null>(null);
   const [cropMode, setCropMode] = useState(false);
   const [busy, setBusy] = useState(Boolean(jobId && clipIndex));
@@ -128,23 +166,19 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
 
   const duration = editor ? timelineDuration(editor.segments) : 0;
   const active = editor?.segments[activeIndex];
-  const activeMedia = media.find((item) => item.id === active?.mediaId);
-  const source = activeMedia?.metadata ?? null;
   const selected = editor?.segments.find((segment) => segment.id === selectedSegment);
+  const selectedSource = media.find((item) => item.id === selected?.mediaId)?.metadata;
+  const selectedAudioClip = editor?.audioTracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedAudio);
 
   const seek = useCallback(
     (time: number) => {
-      if (!editor || !video.current) return;
+      if (!editor) return;
       const location = projectToSource(editor.segments, time);
       if (!location) return;
-      activeSegment.current = location.index;
       setActiveIndex(location.index);
-      pendingSeek.current = location.sourceTime;
-      if (video.current.dataset.mediaId === editor.segments[location.index].mediaId) {
-        video.current.currentTime = location.sourceTime;
-        pendingSeek.current = null;
-      }
-      setPlayhead(Math.min(time, timelineDuration(editor.segments)));
+      const nextTime = Math.min(time, timelineDuration(editor.segments));
+      playbackStart.current = { time: nextTime, wall: performance.now() };
+      setPlayhead(nextTime);
     },
     [editor],
   );
@@ -152,28 +186,18 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   useEffect(() => {
     if (!playing || !editor) return;
     const tick = () => {
-      const element = video.current;
-      if (!element) return;
-      const segment = editor.segments[activeSegment.current];
-      if (!segment) return;
-      if (element.currentTime >= segment.sourceEnd - 0.025) {
-        const next = activeSegment.current + 1;
-        if (next >= editor.segments.length) {
-          playIntent.current = false;
-          element.pause();
-          setPlayhead(timelineDuration(editor.segments));
-          return;
-        }
-        activeSegment.current = next;
-        setActiveIndex(next);
-        pendingSeek.current = editor.segments[next].sourceStart;
-        setPlayhead(editor.segments.slice(0, next).reduce((total, value) => total + value.sourceEnd - value.sourceStart, 0));
+      const nextTime = playbackStart.current.time + (performance.now() - playbackStart.current.wall) / 1000;
+      if (nextTime >= timelineDuration(editor.segments)) {
+        playIntent.current = false;
+        videos.current.forEach((element) => element.pause());
+        audios.current.forEach((element) => element.pause());
+        setPlaying(false);
+        setPlayhead(timelineDuration(editor.segments));
         return;
       }
-      const elapsed = editor.segments
-        .slice(0, activeSegment.current)
-        .reduce((total, value) => total + value.sourceEnd - value.sourceStart, 0);
-      setPlayhead(elapsed + element.currentTime - editor.segments[activeSegment.current].sourceStart);
+      const location = projectToSource(editor.segments, nextTime);
+      if (location) setActiveIndex(location.index);
+      setPlayhead(nextTime);
       frame.current = requestAnimationFrame(tick);
     };
     frame.current = requestAnimationFrame(tick);
@@ -183,11 +207,26 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   const volume = editor?.audio.volume;
   const muted = editor?.audio.muted;
   useEffect(() => {
-    if (video.current && editor) {
-      video.current.volume = volume ?? 1;
-      video.current.muted = muted ?? false;
+    if (!editor) return;
+    for (const layer of projectLayers(editor.segments, playhead)) {
+      const element = videos.current.get(layer.index);
+      if (!element) continue;
+      const segment = editor.segments[layer.index];
+      const gain = clipAudioGain(segment.audio, layer.sourceTime - segment.sourceStart, segment.sourceEnd - segment.sourceStart);
+      element.volume = muted ? 0 : (volume ?? 1) * layer.opacity * gain;
+      const drift = Math.abs(element.currentTime - layer.sourceTime);
+      if (!playing || drift > 0.12) element.currentTime = layer.sourceTime;
+      if (playing && element.paused) element.play().catch(() => setError("The browser could not play this video."));
     }
-  }, [editor, volume, muted]);
+    for (const track of editor.audioTracks) for (const clip of track.clips) {
+      const element = audios.current.get(clip.id);
+      if (!element) continue;
+      const sourceTime = clip.sourceStart + playhead - clip.timelineStart;
+      element.volume = muted ? 0 : (volume ?? 1) * audioGainAt(clip, playhead);
+      if (!playing || Math.abs(element.currentTime - sourceTime) > 0.12) element.currentTime = sourceTime;
+      if (playing && element.paused) element.play().catch(() => setError("The browser could not play this audio."));
+    }
+  }, [editor, muted, playhead, playing, volume]);
 
   useEffect(() => {
     if (!exportId || exportStatus === "completed" || exportStatus === "failed") return;
@@ -202,8 +241,12 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
     return () => clearInterval(timer);
   }, [exportId, exportStatus]);
 
-  async function upload(files?: FileList | null) {
+  async function upload(files?: FileList | null, expected: "video" | "audio" = "video") {
     if (!files?.length) return;
+    if (expected === "audio" && editor && editor.audioTracks.length + files.length > 16) {
+      setError("Audio projects can contain at most 16 tracks.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -214,10 +257,21 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
           headers: { "Content-Type": file.type || "application/octet-stream" },
           body: file,
         });
+        if (metadata.kind !== expected) throw new Error(`Choose an ${expected} file.`);
         imported.push({ id: crypto.randomUUID(), name: file.name, source: { kind: "upload", id: metadata.id }, url: `${API}/editor/sources/${metadata.id}`, metadata });
       }
       setMedia((current) => [...current, ...imported]);
-      if (!editor && imported[0]) {
+      if (expected === "audio") {
+        if (!editor) throw new Error("Add a video before importing audio.");
+        const tracks = imported.map((item) => ({
+          id: crypto.randomUUID(),
+          name: item.name,
+          clips: [{ id: crypto.randomUUID(), mediaId: item.id, timelineStart: 0, sourceStart: 0,
+            sourceEnd: Math.min(item.metadata!.duration, duration), audio: defaultClipAudio() }],
+        }));
+        setEditor({ ...editor, audioTracks: [...editor.audioTracks, ...tracks] });
+        setSelectedAudio(tracks[0]?.clips[0]?.id ?? "");
+      } else if (!editor && imported[0]) {
         const next = initialEditor(imported[0].id, 0, imported[0].metadata!.duration);
         setEditor(next);
         setSelectedSegment(next.segments[0].id);
@@ -231,37 +285,55 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   }
 
   function addMedia(item: MediaItem) {
-    if (!editor || !item.metadata) return;
-    const segment = { id: crypto.randomUUID(), mediaId: item.id, sourceStart: 0, sourceEnd: item.metadata.duration, transform: defaultTransform() };
-    activeSegment.current = editor.segments.length;
+    if (!editor || !item.metadata || item.metadata.kind !== "video") return;
+    const segment = { id: crypto.randomUUID(), mediaId: item.id, sourceStart: 0, sourceEnd: item.metadata.duration, transitionDuration: 0, transform: defaultTransform(), audio: defaultClipAudio() };
     setActiveIndex(editor.segments.length);
-    pendingSeek.current = 0;
     setEditor({ ...editor, segments: [...editor.segments, segment] });
     setSelectedSegment(segment.id);
+    setSelectedTransition(null);
     setPlayhead(duration);
   }
 
   function togglePlayback() {
-    const element = video.current;
-    if (!element || !editor) return;
-    if (!element.paused) {
+    if (!editor) return;
+    if (playing) {
       playIntent.current = false;
-      element.pause();
+      videos.current.forEach((element) => element.pause());
+      audios.current.forEach((element) => element.pause());
+      setPlaying(false);
       return;
     }
     if (playhead >= duration - 0.01) seek(0);
     playIntent.current = true;
-    element.play().catch(() => setError("The browser could not play this video."));
+    playbackStart.current = { time: playhead >= duration - 0.01 ? 0 : playhead, wall: performance.now() };
+    setPlaying(true);
+    videos.current.forEach((element) => element.play().catch(() => setError("The browser could not play this video.")));
+    audios.current.forEach((element) => element.play().catch(() => setError("The browser could not play this audio.")));
   }
 
   function split() {
     if (!editor) return;
+    if (selectedAudio) {
+      const ids = [crypto.randomUUID(), crypto.randomUUID()];
+      let index = 0;
+      const tracks = splitAudioClip(editor.audioTracks, selectedAudio, playhead, () => ids[index++]);
+      if (index) {
+        setEditor({ ...editor, audioTracks: tracks });
+        setSelectedAudio(ids[1]);
+      }
+      return;
+    }
+    if (projectLayers(editor.segments, playhead).length > 1) {
+      setError("Move the playhead outside the transition before splitting.");
+      return;
+    }
     const ids = [crypto.randomUUID(), crypto.randomUUID()];
     let index = 0;
     const segments = splitAt(editor.segments, playhead, () => ids[index++]);
     if (segments === editor.segments) return;
     setEditor({ ...editor, segments });
     setSelectedSegment(ids[1]);
+    setSelectedTransition(null);
   }
 
   function removeSelectedSegment() {
@@ -269,14 +341,15 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
     const selectedIndex = editor.segments.findIndex((value) => value.id === selectedSegment);
     const result = deleteSegment(editor.segments, editor.captions, selectedSegment);
     if (result.segments === editor.segments) return;
-    setEditor({ ...editor, ...result });
+    const removed = timelineDuration(editor.segments) - timelineDuration(result.segments);
+    const start = segmentStarts(editor.segments)[selectedIndex];
+    setEditor({ ...editor, ...result, audioTracks: removeAudioTimelineRange(editor.audioTracks, start, start + removed) });
+    setSelectedTransition(null);
     setSelectedSegment(result.segments[Math.min(selectedIndex, result.segments.length - 1)].id);
     const nextPlayhead = Math.min(playhead, timelineDuration(result.segments));
     const location = projectToSource(result.segments, nextPlayhead);
-    if (location && video.current) {
-      activeSegment.current = location.index;
+    if (location) {
       setActiveIndex(location.index);
-      video.current.currentTime = location.sourceTime;
     }
     setPlayhead(nextPlayhead);
   }
@@ -284,7 +357,10 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   function startTrim(event: React.PointerEvent, segment: VideoSegment, edge: "start" | "end") {
     if (!editor || !timeline.current) return;
     event.stopPropagation();
-    video.current?.pause();
+    playIntent.current = false;
+    setPlaying(false);
+    videos.current.forEach((element) => element.pause());
+    audios.current.forEach((element) => element.pause());
     event.currentTarget.setPointerCapture(event.pointerId);
     setDrag({
       startX: event.clientX,
@@ -311,7 +387,20 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
       initial + signedDifference,
       sourceDuration,
     );
-    setEditor({ ...drag.editor, ...result });
+    const oldDuration = timelineDuration(drag.editor.segments);
+    const newDuration = timelineDuration(result.segments);
+    const segmentIndex = drag.editor.segments.findIndex((value) => value.id === drag.segment.id);
+    const oldStart = segmentStarts(drag.editor.segments)[segmentIndex];
+    const nextStart = segmentStarts(result.segments)[segmentIndex];
+    let audioTracks = drag.editor.audioTracks;
+    if (newDuration < oldDuration) {
+      const start = drag.edge === "start" ? oldStart : nextStart + result.segments[segmentIndex].sourceEnd - result.segments[segmentIndex].sourceStart;
+      audioTracks = removeAudioTimelineRange(audioTracks, start, start + oldDuration - newDuration);
+    } else if (newDuration > oldDuration) {
+      const at = drag.edge === "start" ? oldStart : oldStart + drag.segment.sourceEnd - drag.segment.sourceStart;
+      audioTracks = insertAudioTimelineTime(audioTracks, at, newDuration - oldDuration);
+    }
+    setEditor({ ...drag.editor, ...result, audioTracks });
     setPlayhead((value) => Math.min(value, timelineDuration(result.segments)));
   }
 
@@ -367,8 +456,39 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
     ) });
   }
 
+  function updateSegmentAudio(changes: Partial<VideoSegment["audio"]>) {
+    if (!editor || !selected) return;
+    const next = { ...selected.audio, ...changes };
+    const clipDuration = selected.sourceEnd - selected.sourceStart;
+    if (next.fadeIn + next.fadeOut > clipDuration) {
+      if (changes.fadeIn !== undefined) next.fadeOut = Math.max(0, clipDuration - next.fadeIn);
+      else next.fadeIn = Math.max(0, clipDuration - next.fadeOut);
+    }
+    setEditor({ ...editor, segments: editor.segments.map((segment) =>
+      segment.id === selected.id ? { ...segment, audio: next } : segment,
+    ) });
+  }
+
+  function updateTransition(duration: number) {
+    if (!editor || selectedTransition === null) return;
+    const result = setTransition(editor.segments, editor.captions, selectedTransition, duration);
+    const oldDuration = editor.segments[selectedTransition].transitionDuration;
+    const difference = result.segments[selectedTransition].transitionDuration - oldDuration;
+    const junction = segmentStarts(editor.segments)[selectedTransition] + oldDuration;
+    const audioTracks = difference > 0
+      ? removeAudioTimelineRange(editor.audioTracks, junction, junction + difference)
+      : insertAudioTimelineTime(editor.audioTracks, junction, -difference);
+    setEditor({ ...editor, ...result, audioTracks });
+    setPlayhead((value) => Math.min(value, timelineDuration(result.segments)));
+  }
+
   function moveCrop(event: React.PointerEvent) {
     if (!cropDrag || !selected) return;
+    const metadata = media.find((item) => item.id === selected.mediaId)?.metadata;
+    if (!metadata?.width || !metadata.height) return;
+    const scale = Math.max(viewportSize.width / metadata.width, viewportSize.height / metadata.height) * selected.transform.scale;
+    const renderedWidth = metadata.width * scale;
+    const renderedHeight = metadata.height * scale;
     const overflowX = renderedWidth - viewportSize.width;
     const overflowY = renderedHeight - viewportSize.height;
     updateTransform({
@@ -384,6 +504,56 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
       positionX: clamp((event.clientX - bounds.left) / bounds.width, 0.05, 0.95),
       positionY: clamp((event.clientY - bounds.top) / bounds.height, 0.05, 0.95),
     }, captionId);
+  }
+
+  function updateClipAudio(changes: Partial<AudioClip["audio"]>) {
+    if (!editor || !selectedAudioClip) return;
+    const next = { ...selectedAudioClip.audio, ...changes };
+    const clipDuration = audioClipDuration(selectedAudioClip);
+    if (next.fadeIn + next.fadeOut > clipDuration) {
+      if (changes.fadeIn !== undefined) next.fadeOut = Math.max(0, clipDuration - next.fadeIn);
+      else next.fadeIn = Math.max(0, clipDuration - next.fadeOut);
+    }
+    setEditor({ ...editor, audioTracks: editor.audioTracks.map((track) => ({ ...track,
+      clips: track.clips.map((clip) => clip.id === selectedAudio ? { ...clip, audio: next } : clip),
+    })) });
+  }
+
+  function startAudioDrag(event: React.PointerEvent, clip: AudioClip, mode: AudioDrag["mode"]) {
+    if (!editor || !timeline.current) return;
+    event.stopPropagation();
+    playIntent.current = false;
+    setPlaying(false);
+    videos.current.forEach((element) => element.pause());
+    audios.current.forEach((element) => element.pause());
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setAudioDrag({
+      startX: event.clientX,
+      width: timeline.current.getBoundingClientRect().width,
+      duration,
+      mode,
+      clip,
+      editor,
+      sourceDuration: media.find((item) => item.id === clip.mediaId)?.metadata?.duration ?? clip.sourceEnd,
+    });
+  }
+
+  function moveAudioDrag(event: React.PointerEvent) {
+    if (!audioDrag) return;
+    const difference = pixelsToTime(Math.abs(event.clientX - audioDrag.startX), audioDrag.duration, audioDrag.width);
+    const signed = event.clientX < audioDrag.startX ? -difference : difference;
+    const tracks = audioDrag.mode === "move"
+      ? moveAudioClip(audioDrag.editor.audioTracks, audioDrag.clip.id, audioDrag.clip.timelineStart + signed, audioDrag.duration)
+      : trimAudioClip(audioDrag.editor.audioTracks, audioDrag.clip.id, audioDrag.mode,
+          (audioDrag.mode === "start" ? audioDrag.clip.sourceStart : audioDrag.clip.sourceEnd) + signed,
+          audioDrag.sourceDuration, audioDrag.duration);
+    setEditor({ ...audioDrag.editor, audioTracks: tracks });
+  }
+
+  function removeSelectedAudio() {
+    if (!editor || !selectedAudio) return;
+    setEditor({ ...editor, audioTracks: deleteAudioClip(editor.audioTracks, selectedAudio) });
+    setSelectedAudio("");
   }
 
   async function exportVideo() {
@@ -408,6 +578,13 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
             })(),
             source_start: segment.sourceStart,
             source_end: segment.sourceEnd,
+            transition_duration: segment.transitionDuration,
+            audio: {
+              volume: segment.audio.volume,
+              muted: segment.audio.muted,
+              fade_in: segment.audio.fadeIn,
+              fade_out: segment.audio.fadeOut,
+            },
             transform: {
               scale: segment.transform.scale,
               position_x: segment.transform.positionX,
@@ -421,6 +598,22 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
             font_size: editor.captionStyle.fontSize,
           },
           audio: editor.audio,
+          audio_tracks: editor.audioTracks.map((track) => ({
+            id: track.id,
+            name: track.name,
+            clips: track.clips.map((clip) => {
+              const item = media.find((value) => value.id === clip.mediaId)!;
+              return {
+                id: clip.id,
+                source: item.source,
+                timeline_start: clip.timelineStart,
+                source_start: clip.sourceStart,
+                source_end: clip.sourceEnd,
+                audio: { volume: clip.audio.volume, muted: clip.audio.muted,
+                  fade_in: clip.audio.fadeIn, fade_out: clip.audio.fadeOut },
+              };
+            }),
+          })),
         }),
       });
       setExportId(state.id);
@@ -452,19 +645,31 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
     (caption) => caption.start <= playhead && playhead < caption.end,
   );
   const caption = editor.captions.find((value) => value.id === selectedCaption);
+  const transition = selectedTransition === null ? null : editor.segments[selectedTransition];
+  const transitionMax = selectedTransition === null ? 0 : transitionLimit(editor.segments, selectedTransition);
+  const starts = segmentStarts(editor.segments);
   const exportIsCurrent = exportStatus === "completed" && exportSnapshot === JSON.stringify(editor);
-  const transform = active?.transform ?? defaultTransform();
-  const baseScale = source && viewportSize.width
-    ? Math.max(viewportSize.width / source.width, viewportSize.height / source.height) * transform.scale
-    : 1;
-  const renderedWidth = source ? source.width * baseScale : viewportSize.width;
-  const renderedHeight = source ? source.height * baseScale : viewportSize.height;
-  const videoStyle = {
-    width: renderedWidth,
-    height: renderedHeight,
-    left: -(renderedWidth - viewportSize.width) * ((transform.positionX + 1) / 2),
-    top: -(renderedHeight - viewportSize.height) * ((transform.positionY + 1) / 2),
-  };
+  const previewLayers = projectLayers(editor.segments, playhead);
+  const activeAudioClips = editor.audioTracks.flatMap((track) => track.clips).filter((clip) =>
+    clip.timelineStart <= playhead && playhead < clip.timelineStart + audioClipDuration(clip),
+  );
+
+  function layerStyle(index: number, opacity: number) {
+    const segment = editor!.segments[index];
+    const metadata = media.find((item) => item.id === segment.mediaId)?.metadata;
+    const baseScale = metadata?.width && metadata.height && viewportSize.width
+      ? Math.max(viewportSize.width / metadata.width, viewportSize.height / metadata.height) * segment.transform.scale
+      : 1;
+    const width = metadata?.width ? metadata.width * baseScale : viewportSize.width;
+    const height = metadata?.height ? metadata.height * baseScale : viewportSize.height;
+    return {
+      width,
+      height,
+      left: -(width - viewportSize.width) * ((segment.transform.positionX + 1) / 2),
+      top: -(height - viewportSize.height) * ((segment.transform.positionY + 1) / 2),
+      opacity,
+    };
+  }
 
   return (
     <main className="editor-shell">
@@ -480,11 +685,26 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
         </div>
       </header>
       {error && <div role="alert" className="error editor-error">{error}</div>}
+      {activeAudioClips.map((clip) => {
+        const item = media.find((value) => value.id === clip.mediaId);
+        return <audio
+          key={clip.id}
+          ref={(element) => { if (element) audios.current.set(clip.id, element); else audios.current.delete(clip.id); }}
+          src={item?.url}
+          preload="auto"
+          onLoadedMetadata={(event) => {
+            const element = event.currentTarget;
+            element.currentTime = clip.sourceStart + playhead - clip.timelineStart;
+            element.volume = editor.audio.muted ? 0 : editor.audio.volume * audioGainAt(clip, playhead);
+            if (playIntent.current) element.play().catch(() => setError("The browser could not play this audio."));
+          }}
+        />;
+      })}
       <div className="editor-workspace">
         <aside className="media-bin">
           <div className="media-bin-header"><h2>Videos</h2><label className="secondary file-button">{busy ? "Importing…" : "+ Import"}<input type="file" accept="video/*" multiple disabled={busy} onChange={(event) => upload(event.target.files)} /></label></div>
           <div className="media-list">
-            {media.map((item) => (
+            {media.filter((item) => item.metadata?.kind !== "audio").map((item) => (
               <article key={item.id} className={item.id === active?.mediaId ? "active" : ""}>
                 <strong title={item.name}>{item.name}</strong>
                 <span>{item.metadata ? formatTime(item.metadata.duration) : "Loading…"}</span>
@@ -492,6 +712,7 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
               </article>
             ))}
           </div>
+          <div className="audio-import"><h2>Audio</h2><label className="secondary file-button">+ Add tracks<input type="file" accept="audio/*" multiple disabled={busy} onChange={(event) => upload(event.target.files, "audio")} /></label></div>
         </aside>
         <section className="editor-stage">
           <div
@@ -507,26 +728,28 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
             onPointerUp={() => setCropDrag(null)}
             onPointerCancel={() => setCropDrag(null)}
           >
-            <video
-              key={activeMedia?.id}
-              ref={video}
-              src={activeMedia?.url}
-              data-media-id={activeMedia?.id}
-              playsInline
-              preload="metadata"
-              style={videoStyle}
-              onLoadedMetadata={(event) => {
-                const element = event.currentTarget;
-                setMedia((current) => current.map((item) => item.id === activeMedia?.id ? { ...item, metadata: item.metadata ?? { duration: element.duration, width: element.videoWidth, height: element.videoHeight, has_audio: true } } : item));
-                if (pendingSeek.current !== null) {
-                  element.currentTime = pendingSeek.current;
-                  pendingSeek.current = null;
-                } else if (active) element.currentTime = active.sourceStart;
-                if (playIntent.current) element.play().catch(() => setError("The browser could not play this video."));
-              }}
-              onPlay={() => setPlaying(true)}
-              onPause={() => { if (!playIntent.current) setPlaying(false); }}
-            />
+            {previewLayers.map((layer) => {
+              const segment = editor.segments[layer.index];
+              const item = media.find((value) => value.id === segment.mediaId);
+              return <video
+                key={`${layer.index}-${item?.id}`}
+                ref={(element) => {
+                  if (element) videos.current.set(layer.index, element);
+                  else videos.current.delete(layer.index);
+                }}
+                src={item?.url}
+                playsInline
+                preload="auto"
+                style={layerStyle(layer.index, layer.opacity)}
+                onLoadedMetadata={(event) => {
+                  const element = event.currentTarget;
+                  setMedia((current) => current.map((value) => value.id === item?.id ? { ...value, metadata: value.metadata ?? { kind: "video", duration: element.duration, width: element.videoWidth, height: element.videoHeight, has_audio: true } } : value));
+                  element.currentTime = layer.sourceTime;
+                  element.volume = editor.audio.muted ? 0 : editor.audio.volume * layer.opacity * clipAudioGain(segment.audio, layer.sourceTime - segment.sourceStart, segment.sourceEnd - segment.sourceStart);
+                  if (playIntent.current) element.play().catch(() => setError("The browser could not play this video."));
+                }}
+              />;
+            })}
             {activeCaption && (
               <div
                 className={`preview-caption caption-${editor.captionStyle.preset}`}
@@ -575,8 +798,33 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
           </section>
           <section>
             <h2>Audio</h2>
-            <label>Volume <span>{Math.round(editor.audio.volume * 100)}%</span><input type="range" min="0" max="1" step="0.01" disabled={!source?.has_audio} value={editor.audio.volume} onChange={(event) => setEditor({ ...editor, audio: { ...editor.audio, volume: Number(event.target.value) } })} /></label>
-            <label className="check-label"><input type="checkbox" disabled={!source?.has_audio} checked={editor.audio.muted} onChange={(event) => setEditor({ ...editor, audio: { ...editor.audio, muted: event.target.checked } })} />Mute</label>
+            <label>Master volume <span>{Math.round(editor.audio.volume * 100)}%</span><input type="range" min="0" max="1" step="0.01" value={editor.audio.volume} onChange={(event) => setEditor({ ...editor, audio: { ...editor.audio, volume: Number(event.target.value) } })} /></label>
+            <label className="check-label"><input type="checkbox" checked={editor.audio.muted} onChange={(event) => setEditor({ ...editor, audio: { ...editor.audio, muted: event.target.checked } })} />Mute all</label>
+            {selectedAudioClip && <div className="clip-audio-controls">
+              <h3>Selected audio clip</h3>
+              <label>Volume <span>{Math.round(selectedAudioClip.audio.volume * 100)}%</span><input type="range" min="0" max="1" step="0.01" value={selectedAudioClip.audio.volume} onChange={(event) => updateClipAudio({ volume: Number(event.target.value) })} /></label>
+              <label className="check-label"><input type="checkbox" checked={selectedAudioClip.audio.muted} onChange={(event) => updateClipAudio({ muted: event.target.checked })} />Mute clip</label>
+              <label>Fade in <span>{selectedAudioClip.audio.fadeIn.toFixed(1)}s</span><input type="range" min="0" max={Math.min(5, audioClipDuration(selectedAudioClip) - selectedAudioClip.audio.fadeOut)} step="0.1" value={selectedAudioClip.audio.fadeIn} onChange={(event) => updateClipAudio({ fadeIn: Number(event.target.value) })} /></label>
+              <label>Fade out <span>{selectedAudioClip.audio.fadeOut.toFixed(1)}s</span><input type="range" min="0" max={Math.min(5, audioClipDuration(selectedAudioClip) - selectedAudioClip.audio.fadeIn)} step="0.1" value={selectedAudioClip.audio.fadeOut} onChange={(event) => updateClipAudio({ fadeOut: Number(event.target.value) })} /></label>
+            </div>}
+            {!selectedAudioClip && selected && selectedSource?.has_audio && <div className="clip-audio-controls">
+              <h3>Linked clip audio</h3>
+              <label>Volume <span>{Math.round(selected.audio.volume * 100)}%</span><input type="range" min="0" max="1" step="0.01" value={selected.audio.volume} onChange={(event) => updateSegmentAudio({ volume: Number(event.target.value) })} /></label>
+              <label className="check-label"><input type="checkbox" checked={selected.audio.muted} onChange={(event) => updateSegmentAudio({ muted: event.target.checked })} />Mute clip</label>
+              <label>Fade in <span>{selected.audio.fadeIn.toFixed(1)}s</span><input type="range" min="0" max={Math.min(5, selected.sourceEnd - selected.sourceStart - selected.audio.fadeOut)} step="0.1" value={selected.audio.fadeIn} onChange={(event) => updateSegmentAudio({ fadeIn: Number(event.target.value) })} /></label>
+              <label>Fade out <span>{selected.audio.fadeOut.toFixed(1)}s</span><input type="range" min="0" max={Math.min(5, selected.sourceEnd - selected.sourceStart - selected.audio.fadeIn)} step="0.1" value={selected.audio.fadeOut} onChange={(event) => updateSegmentAudio({ fadeOut: Number(event.target.value) })} /></label>
+            </div>}
+          </section>
+          <section>
+            <h2>Transition</h2>
+            {transition ? <>
+              <button
+                className="secondary"
+                aria-pressed={transition.transitionDuration > 0}
+                onClick={() => updateTransition(transition.transitionDuration ? 0 : Math.min(0.5, transitionMax))}
+              >{transition.transitionDuration ? "Remove crossfade" : "Add crossfade"}</button>
+              {transition.transitionDuration > 0 && <label>Duration <span>{transition.transitionDuration.toFixed(1)}s</span><input type="range" min={MIN_TRANSITION_DURATION} max={transitionMax} step="0.1" value={transition.transitionDuration} onChange={(event) => updateTransition(Number(event.target.value))} /></label>}
+            </> : <p className="inspector-hint">Select a cut between clips to add a crossfade.</p>}
           </section>
           <section>
             <h2>Captions</h2>
@@ -599,7 +847,7 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
 
       <section className="timeline-panel">
         <div className="timeline-toolbar">
-          <div><button className="secondary" onClick={split}>Split</button><button className="text-button danger" onClick={removeSelectedSegment} disabled={editor.segments.length === 1}>Delete segment</button></div>
+          <div><button className="secondary" onClick={split}>Split</button>{selectedAudio ? <button className="text-button danger" onClick={removeSelectedAudio}>Delete audio clip</button> : <button className="text-button danger" onClick={removeSelectedSegment} disabled={editor.segments.length === 1}>Delete segment</button>}</div>
           <span>{formatTime(playhead)} / {formatTime(duration)}</span>
         </div>
         <div className="timeline">
@@ -610,14 +858,53 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
               {editor.segments.map((segment, index) => {
                 const selected = segment.id === selectedSegment;
                 return (
-                  <div key={segment.id} role="button" tabIndex={0} className={`segment ${selected ? "selected" : ""}`} style={{ width: `${((segment.sourceEnd - segment.sourceStart) / duration) * 100}%` }} onClick={(event) => { event.stopPropagation(); setSelectedSegment(segment.id); const bounds = timeline.current!.getBoundingClientRect(); seek(pixelsToTime(event.clientX - bounds.left, duration, bounds.width)); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedSegment(segment.id); }}>
+                  <div key={segment.id} role="button" tabIndex={0} className={`segment ${selected ? "selected" : ""}`} style={{ left: timeToPixels(starts[index], duration, timelineWidth), width: Math.max(3, timeToPixels(segment.sourceEnd - segment.sourceStart, duration, timelineWidth)), zIndex: index + 1 }} onClick={(event) => { event.stopPropagation(); setSelectedSegment(segment.id); setSelectedAudio(""); setSelectedTransition(null); const bounds = timeline.current!.getBoundingClientRect(); seek(pixelsToTime(event.clientX - bounds.left, duration, bounds.width)); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { setSelectedSegment(segment.id); setSelectedAudio(""); setSelectedTransition(null); } }}>
                     {selected && <button aria-label="Trim segment start" className="trim-handle start" onPointerDown={(event) => startTrim(event, segment, "start")} onPointerMove={moveTrim} onPointerUp={() => setDrag(null)} onPointerCancel={() => setDrag(null)} />}
                     <span>{media.find((item) => item.id === segment.mediaId)?.name ?? `Clip ${index + 1}`}</span>
                     {selected && <button aria-label="Trim segment end" className="trim-handle end" onPointerDown={(event) => startTrim(event, segment, "end")} onPointerMove={moveTrim} onPointerUp={() => setDrag(null)} onPointerCancel={() => setDrag(null)} />}
                   </div>
                 );
               })}
+              {editor.segments.slice(1).map((segment, offset) => {
+                const index = offset + 1;
+                return <button
+                  key={`transition-${segment.id}`}
+                  className={`transition-marker ${selectedTransition === index ? "selected" : ""} ${segment.transitionDuration ? "active" : ""}`}
+                  style={{ left: timeToPixels(starts[index], duration, timelineWidth), width: Math.max(18, timeToPixels(segment.transitionDuration, duration, timelineWidth)) }}
+                  aria-label={`Transition into clip ${index + 1}`}
+                  onClick={(event) => { event.stopPropagation(); setSelectedTransition(index); seek(starts[index] + segment.transitionDuration / 2); }}
+                >{segment.transitionDuration ? "×" : "+"}</button>;
+              })}
             </div>
+            <span className="track-label">LINKED</span>
+            <div className="audio-track linked-audio-track">
+              {editor.segments.map((segment, index) => {
+                const item = media.find((value) => value.id === segment.mediaId);
+                const sourceDuration = item?.metadata?.duration ?? segment.sourceEnd;
+                const clipDuration = segment.sourceEnd - segment.sourceStart;
+                return <button key={`linked-${segment.id}`} className={`audio-clip linked ${segment.id === selectedSegment ? "selected" : ""}`} style={{ left: timeToPixels(starts[index], duration, timelineWidth), width: Math.max(3, timeToPixels(clipDuration, duration, timelineWidth)) }} onClick={(event) => { event.stopPropagation(); setSelectedSegment(segment.id); setSelectedAudio(""); seek(starts[index]); }}>
+                  {item?.metadata?.has_audio && <span className="waveform" style={{ width: `${sourceDuration / clipDuration * 100}%`, left: `${-segment.sourceStart / clipDuration * 100}%`, backgroundImage: `url(${waveformUrl(item)})` }} />}
+                  <span className="audio-clip-name">{item?.name}</span>
+                </button>;
+              })}
+            </div>
+            {editor.audioTracks.map((track) => <div className="audio-track-row" key={track.id}>
+              <div className="track-label audio-track-label"><span title={track.name}>{track.name}</span><button aria-label={`Delete ${track.name}`} onClick={(event) => { event.stopPropagation(); setEditor({ ...editor, audioTracks: editor.audioTracks.filter((value) => value.id !== track.id) }); setSelectedAudio(""); }}>×</button></div>
+              <div className="audio-track">
+                {track.clips.map((clip) => {
+                  const item = media.find((value) => value.id === clip.mediaId);
+                  const clipDuration = audioClipDuration(clip);
+                  const sourceDuration = item?.metadata?.duration ?? clip.sourceEnd;
+                  return <div key={clip.id} role="button" tabIndex={0} className={`audio-clip ${clip.id === selectedAudio ? "selected" : ""}`} style={{ left: timeToPixels(clip.timelineStart, duration, timelineWidth), width: Math.max(3, timeToPixels(clipDuration, duration, timelineWidth)) }} onPointerDown={(event) => startAudioDrag(event, clip, "move")} onPointerMove={moveAudioDrag} onPointerUp={() => setAudioDrag(null)} onPointerCancel={() => setAudioDrag(null)} onClick={(event) => { event.stopPropagation(); setSelectedAudio(clip.id); setSelectedSegment(""); seek(clip.timelineStart); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { setSelectedAudio(clip.id); setSelectedSegment(""); } }}>
+                    <span className="waveform" style={{ width: `${sourceDuration / clipDuration * 100}%`, left: `${-clip.sourceStart / clipDuration * 100}%`, backgroundImage: `url(${waveformUrl(item)})` }} />
+                    <span className="fade-region start" style={{ width: `${clip.audio.fadeIn / clipDuration * 100}%` }} />
+                    <span className="fade-region end" style={{ width: `${clip.audio.fadeOut / clipDuration * 100}%` }} />
+                    <span className="audio-clip-name">{item?.name}</span>
+                    {clip.id === selectedAudio && <><button aria-label="Trim audio start" className="trim-handle start" onPointerDown={(event) => startAudioDrag(event, clip, "start")} onPointerMove={moveAudioDrag} onPointerUp={() => setAudioDrag(null)} onPointerCancel={() => setAudioDrag(null)} /><button aria-label="Trim audio end" className="trim-handle end" onPointerDown={(event) => startAudioDrag(event, clip, "end")} onPointerMove={moveAudioDrag} onPointerUp={() => setAudioDrag(null)} onPointerCancel={() => setAudioDrag(null)} /></>}
+                  </div>;
+                })}
+              </div>
+            </div>)}
             <span className="track-label">CAPTIONS</span>
             <div className="caption-track">
               {editor.captions.map((value) => (

@@ -93,7 +93,7 @@ async def upload_editor_source(request: Request):
     if length:
         try:
             if int(length) > settings.max_upload_bytes:
-                raise HTTPException(413, "Video exceeds the configured upload limit.")
+                raise HTTPException(413, "Media exceeds the configured upload limit.")
         except ValueError as exc:
             raise HTTPException(400, "Invalid Content-Length header.") from exc
     source_id, folder = editor.create_source()
@@ -103,16 +103,22 @@ async def upload_editor_source(request: Request):
             async for chunk in request.stream():
                 size += len(chunk)
                 if size > settings.max_upload_bytes:
-                    raise HTTPException(413, "Video exceeds the configured upload limit.")
+                    raise HTTPException(413, "Media exceeds the configured upload limit.")
                 output.write(chunk)
         if not size:
-            raise HTTPException(422, "Choose a non-empty video file.")
+            raise HTTPException(422, "Choose a non-empty video or audio file.")
         source = folder / "source"
-        temporary.replace(source)
-        metadata = video.probe_media(source)
+        metadata = video.probe_source(temporary)
+        if metadata["kind"] == "audio":
+            video.normalize_audio(temporary, source)
+            temporary.unlink()
+            metadata = video.probe_source(source)
+        else:
+            temporary.replace(source)
         if metadata["duration"] > settings.max_video_seconds:
-            raise HTTPException(422, f"Video must be no longer than {settings.max_video_seconds // 60} minutes.")
-        metadata.update(id=str(source_id), media_type=request.headers.get("content-type", "application/octet-stream"))
+            raise HTTPException(422, f"Media must be no longer than {settings.max_video_seconds // 60} minutes.")
+        media_type = "audio/mp4" if metadata["kind"] == "audio" else request.headers.get("content-type", "application/octet-stream")
+        metadata.update(id=str(source_id), media_type=media_type)
         (folder / "metadata.json").write_text(json.dumps(metadata, allow_nan=False), encoding="utf-8")
         return metadata
     except HTTPException:
@@ -135,6 +141,16 @@ def get_editor_source(source_id: UUID):
     return FileResponse(path, media_type=metadata.get("media_type") or "application/octet-stream")
 
 
+@app.get("/editor/sources/{source_id}/waveform")
+def get_editor_source_waveform(source_id: UUID):
+    try:
+        return FileResponse(editor.source_waveform(source_id), media_type="image/png")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Editor source not found.") from exc
+    except PipelineError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.get("/editor/jobs/{job_id}/source")
 def get_editor_job_source(job_id: UUID):
     try:
@@ -144,6 +160,16 @@ def get_editor_job_source(job_id: UUID):
     except PipelineError as exc:
         raise HTTPException(409, str(exc)) from exc
     return FileResponse(path)
+
+
+@app.get("/editor/jobs/{job_id}/waveform")
+def get_editor_job_waveform(job_id: UUID):
+    try:
+        return FileResponse(editor.job_waveform(job_id), media_type="image/png")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "AI job not found.") from exc
+    except PipelineError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/editor/exports", status_code=202)

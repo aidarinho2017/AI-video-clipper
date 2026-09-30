@@ -49,10 +49,37 @@ def resolve_source(source: UploadSource | JobSource) -> Path:
     return job_source(source.job_id)
 
 
+def source_waveform(source_id: UUID) -> Path:
+    source, metadata = read_source(source_id)
+    if not metadata["has_audio"]:
+        raise PipelineError("This source has no audio waveform.")
+    target = source.parent / "waveform.png"
+    if not target.is_file():
+        video.render_waveform(source, target)
+    return target
+
+
+def job_waveform(job_id: UUID) -> Path:
+    source = job_source(job_id)
+    target = source.parent / "waveform.png"
+    if not target.is_file():
+        if not video.probe_media(source)["has_audio"]:
+            raise PipelineError("This source has no audio waveform.")
+        video.render_waveform(source, target)
+    return target
+
+
 def create_export(edit: EditorExportRequest) -> dict:
     for segment in edit.segments:
         if segment.source_end > video.probe_media(resolve_source(segment.source))["duration"]:
             raise PipelineError("A video segment exceeds its source duration.")
+    for track in edit.audio_tracks:
+        for clip in track.clips:
+            metadata = video.probe_source(resolve_source(clip.source))
+            if not metadata["has_audio"]:
+                raise PipelineError("An audio clip source contains no audio.")
+            if clip.source_end > metadata["duration"]:
+                raise PipelineError("An audio clip exceeds its source duration.")
     export_id = uuid4()
     folder = settings.data_dir / "editor-exports" / str(export_id)
     folder.mkdir(parents=True)
@@ -72,7 +99,9 @@ def process_export(export_id: str, edit: EditorExportRequest):
         state["status"] = "processing"
         _save(folder, state)
         sources = [(resolve_source(segment.source), segment) for segment in edit.segments]
-        video.render_edit(sources, folder / "video.mp4", edit)
+        audio_sources = [(resolve_source(clip.source), clip)
+                         for track in edit.audio_tracks for clip in track.clips]
+        video.render_edit(sources, audio_sources, folder / "video.mp4", edit)
         state["status"] = "completed"
         _save(folder, state)
     except Exception as exc:
