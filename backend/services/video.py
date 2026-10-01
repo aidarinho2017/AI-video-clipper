@@ -1,8 +1,12 @@
 import json
 import logging
 import math
+import re
 import subprocess
+import textwrap
 from pathlib import Path
+
+import cv2
 
 from ..models import AudioClip, ClipCandidate, EditorExportRequest, PipelineError, VideoSegment
 
@@ -67,14 +71,114 @@ def extract_audio(source: Path, target: Path):
     run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "48k", str(target)])
 
 
-def render(source: Path, target: Path, clip: ClipCandidate):
+TIMED_LINE = re.compile(r"^\[(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]\s+(.+)$")
+
+
+def _face_center(source: Path, clip: ClipCandidate) -> float:
+    detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    if detector.empty():
+        return 0.5
+    capture = cv2.VideoCapture(str(source))
+    detections = []
+    try:
+        samples = min(12, max(3, math.ceil((clip.end - clip.start) / 3)))
+        for index in range(samples):
+            timestamp = clip.start + (clip.end - clip.start) * (index + 0.5) / samples
+            capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            ok, frame = capture.read()
+            if not ok:
+                continue
+            _, width = frame.shape[:2]
+            scale = min(1, 640 / width)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if scale < 1:
+                gray = cv2.resize(gray, (round(width * scale), round(height * scale)))
+            faces = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                               minSize=(40, 40))
+            if len(faces):
+                x, _, face_width, face_height = max(faces, key=lambda face: face[2] * face[3])
+                detections.append(((x + face_width / 2) / gray.shape[1], face_width * face_height))
+    except cv2.error:
+        return 0.5
+    finally:
+        capture.release()
+    if not detections:
+        return 0.5
+    bins = [0] * 5
+    for center, area in detections:
+        bins[min(4, int(center * 5))] += area
+    dominant = max(range(5), key=bins.__getitem__)
+    faces = [(center, area) for center, area in detections if min(4, int(center * 5)) == dominant]
+    return sum(center * area for center, area in faces) / sum(area for _, area in faces)
+
+
+def _caption_cues(transcript: str, clip: ClipCandidate) -> list[tuple[float, float, str]]:
+    cues = []
+    for line in transcript.splitlines():
+        match = TIMED_LINE.match(line.strip())
+        if not match:
+            continue
+        start, end, text = float(match[1]), float(match[2]), match[3].strip()
+        start, end = max(start, clip.start), min(end, clip.end)
+        if end <= start or not text:
+            continue
+        words, chunks, current = text.split(), [], []
+        for word in words:
+            if current and len(" ".join(current + [word])) > 52:
+                chunks.append(current)
+                current = []
+            current.append(word)
+        if current:
+            chunks.append(current)
+        total_words = sum(map(len, chunks))
+        offset = start
+        for chunk in chunks:
+            chunk_end = end if chunk is chunks[-1] else offset + (end - start) * len(chunk) / total_words
+            wrapped = textwrap.wrap(" ".join(chunk), width=28, break_long_words=False)
+            cues.append((offset - clip.start, chunk_end - clip.start, "\\N".join(wrapped[:2])))
+            offset = chunk_end
+    return cues
+
+
+def _write_generated_captions(path: Path, transcript: str, clip: ClipCandidate):
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Liberation Sans,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,1,2,90,90,230,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    lines = []
+    for start, end, text in _caption_cues(transcript, clip):
+        safe = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+        safe = safe.replace("\\\\N", "\\N")
+        lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{safe}")
+    path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def render(source: Path, target: Path, clip: ClipCandidate, transcript: str):
     temporary = target.with_suffix(".partial.mp4")
-    run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", str(clip.start), "-i", str(source),
-         "-t", str(clip.end - clip.start), "-map", "0:v:0", "-map", "0:a:0",
-         "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1",
-         "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(temporary)])
-    temporary.replace(target)
+    caption_file = target.with_suffix(".captions.ass")
+    _write_generated_captions(caption_file, transcript, clip)
+    center = _face_center(source, clip)
+    crop = f"crop=1080:1920:max(0\\,min(iw-ow\\,iw*{center:.4f}-ow/2)):(ih-oh)/2"
+    escaped = caption_file.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
+    filters = ("scale=1080:1920:force_original_aspect_ratio=increase," + crop +
+               f",setsar=1,subtitles=filename='{escaped}'")
+    try:
+        run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", str(clip.start), "-i", str(source),
+             "-t", str(clip.end - clip.start), "-map", "0:v:0", "-map", "0:a:0",
+             "-vf", filters, "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(temporary)])
+        temporary.replace(target)
+    finally:
+        caption_file.unlink(missing_ok=True)
 
 
 RESOLUTIONS = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}

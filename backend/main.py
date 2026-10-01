@@ -60,8 +60,9 @@ def create_job(body: JobRequest, background: BackgroundTasks):
     if not jobs.lock.acquire(blocking=False):
         raise HTTPException(409, "A video is already processing. Wait for it to finish.")
     try:
-        state = jobs.create(url, body.model)
-        background.add_task(jobs.process, state["id"], url, body.model, body.instructions)
+        state = jobs.create(url, body.model, body.clip_length, body.clip_count)
+        background.add_task(jobs.process, state["id"], url, body.model, body.instructions,
+                            body.clip_length, body.clip_count)
         return state
     except Exception:
         jobs.lock.release()

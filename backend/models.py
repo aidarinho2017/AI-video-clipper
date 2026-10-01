@@ -20,8 +20,8 @@ class ClipCandidate(BaseModel):
 
     @model_validator(mode="after")
     def duration_is_valid(self):
-        if not 15 <= self.end - self.start <= 30:
-            raise ValueError("Clips must last 15–30 seconds")
+        if not 15 <= self.end - self.start <= 90:
+            raise ValueError("Clips must last 15–90 seconds")
         return self
 
 
@@ -33,6 +33,8 @@ class JobRequest(BaseModel):
     youtube_url: str = Field(min_length=1, max_length=2048)
     model: str = Field(default="gemini-fast", min_length=1, max_length=80)
     instructions: str = Field(default="", max_length=2000)
+    clip_length: Literal["short", "medium", "long"] = "short"
+    clip_count: Literal[1, 3, 5, 10] = 5
 
 
 class TranscriptSegment(BaseModel):

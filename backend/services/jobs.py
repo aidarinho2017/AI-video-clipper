@@ -35,17 +35,20 @@ def recover():
             log.exception("Could not recover job %s", path.parent.name)
 
 
-def create(url: str, model_id: str = analysis.DEFAULT_MODEL) -> dict:
+def create(url: str, model_id: str = analysis.DEFAULT_MODEL, clip_length: str = "short",
+           clip_count: int = 5) -> dict:
     job_id = str(uuid4())
     folder = settings.data_dir / job_id
     folder.mkdir(parents=True)
     state = dict(id=job_id, status="queued", stage="downloading", model=model_id,
+                 clip_length=clip_length, clip_count=clip_count,
                  completed_clips=0, clips=[], error=None)
     save(folder, state)
     return state
 
 
-def process(job_id: str, url: str, model_id: str = analysis.DEFAULT_MODEL, instructions: str = ""):
+def process(job_id: str, url: str, model_id: str = analysis.DEFAULT_MODEL, instructions: str = "",
+            clip_length: str = "short", clip_count: int = 5):
     folder = settings.data_dir / job_id
     state = None
 
@@ -70,11 +73,12 @@ def process(job_id: str, url: str, model_id: str = analysis.DEFAULT_MODEL, instr
             video.extract_audio(source, audio)
             transcript = gemini.transcribe(audio, duration)
         update("analyzing")
-        selected, candidates = analysis.analyze(transcript, duration, update, model_id, instructions)
+        selected, candidates = analysis.analyze(
+            transcript, duration, update, model_id, instructions, clip_length, clip_count)
         (folder / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
         update("rendering")
         for index, clip in enumerate(selected, 1):
-            video.render(source, folder / f"clip-{index}.mp4", clip)
+            video.render(source, folder / f"clip-{index}.mp4", clip, transcript)
             state["clips"].append({**clip.model_dump(), "index": index})
             state["completed_clips"] = index
             save(folder, state)

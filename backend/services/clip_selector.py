@@ -3,12 +3,13 @@ from pydantic import ValidationError
 from ..models import ClipCandidate
 
 
-def select(candidates: list, duration: float) -> list[ClipCandidate]:
+def select(candidates: list, duration: float, minimum: int = 15, maximum: int = 30,
+           limit: int = 5) -> list[ClipCandidate]:
     valid = []
     for value in candidates:
         try:
             clip = ClipCandidate.model_validate(value)
-            if clip.end <= duration:
+            if clip.end <= duration and minimum <= clip.end - clip.start <= maximum:
                 valid.append(clip)
         except ValidationError:
             continue
@@ -17,6 +18,6 @@ def select(candidates: list, duration: float) -> list[ClipCandidate]:
     for clip in valid:
         if all(clip.end <= other.start or clip.start >= other.end for other in selected):
             selected.append(clip)
-        if len(selected) == 5:
+        if len(selected) == limit:
             break
     return selected

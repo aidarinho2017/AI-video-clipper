@@ -18,7 +18,8 @@ def main():
         extract_audio(source, folder / "audio.m4a")
         render_waveform(source, folder / "waveform.png")
         assert (folder / "waveform.png").stat().st_size > 0
-        render(source, target, ClipCandidate.model_validate({**candidate(1), "end": 16}))
+        render(source, target, ClipCandidate.model_validate({**candidate(1), "end": 16}),
+               "[1.00-8.00] Smoke test captions\n[8.00-16.00] Stay inside the safe area")
         assert 14.9 <= probe(target) <= 15.1
         info = json.loads(run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(target)]))
         stream = next(s for s in info["streams"] if s["codec_type"] == "video")

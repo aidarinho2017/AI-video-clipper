@@ -28,6 +28,8 @@ type Job = {
   status: "queued" | "processing" | "completed" | "failed";
   stage: string;
   completed_clips: number;
+  clip_length?: "short" | "medium" | "long";
+  clip_count?: 1 | 3 | 5 | 10;
   clips: Clip[];
   error: string | null;
 };
@@ -75,6 +77,10 @@ export default function Home() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [model, setModel] = useState("gemini-fast");
   const [instructions, setInstructions] = useState("");
+  const [clipLength, setClipLength] = useState<"short" | "medium" | "long">(
+    "short",
+  );
+  const [clipCount, setClipCount] = useState<1 | 3 | 5 | 10>(5);
 
   useEffect(() => {
     request<ModelCatalog>("/ai/models")
@@ -148,6 +154,8 @@ export default function Home() {
           youtube_url: url,
           model,
           instructions,
+          clip_length: clipLength,
+          clip_count: clipCount,
         }),
       });
       localStorage.setItem(STORAGE, data.id);
@@ -240,6 +248,40 @@ export default function Home() {
                 onChange={(event) => setInstructions(event.target.value)}
               />
               <small>{instructions.length}/2000</small>
+              <div className="setting-grid">
+                <div>
+                  <label htmlFor="clip-length">Clip length</label>
+                  <select
+                    id="clip-length"
+                    value={clipLength}
+                    onChange={(event) =>
+                      setClipLength(
+                        event.target.value as "short" | "medium" | "long",
+                      )
+                    }
+                  >
+                    <option value="short">Short · 15–30 sec</option>
+                    <option value="medium">Medium · 30–60 sec</option>
+                    <option value="long">Long · 60–90 sec</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="clip-count">Number of clips</label>
+                  <select
+                    id="clip-count"
+                    value={clipCount}
+                    onChange={(event) =>
+                      setClipCount(Number(event.target.value) as 1 | 3 | 5 | 10)
+                    }
+                  >
+                    {[1, 3, 5, 10].map((count) => (
+                      <option key={count} value={count}>
+                        {count}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </fieldset>
             <button
               className="primary"
@@ -256,7 +298,10 @@ export default function Home() {
       )}
       {processing && (
         <section className="processing panel" aria-live="polite">
-          <div className="eyebrow">YOUR NEXT FIVE CLIPS</div>
+          <div className="eyebrow">
+            YOUR NEXT {job.clip_count ?? 5}{" "}
+            {(job.clip_count ?? 5) === 1 ? "CLIP" : "CLIPS"}
+          </div>
           <h1>
             Good moments.
             <br />
@@ -280,7 +325,9 @@ export default function Home() {
                   </span>
                   {label}
                   {id === "rendering" && index === current && (
-                    <small>{job.completed_clips}/5</small>
+                    <small>
+                      {job.completed_clips}/{job.clip_count ?? 5}
+                    </small>
                   )}
                 </li>
               );
@@ -305,7 +352,10 @@ export default function Home() {
         <section className="results">
           <header>
             <div>
-              <div className="eyebrow">FROM LONG-FORM TO SHORT-FORM</div>
+              <div className="eyebrow">
+                GENERATED {job.clips.length} OF {job.clip_count ?? 5}{" "}
+                {(job.clip_count ?? 5) === 1 ? "CLIP" : "CLIPS"}
+              </div>
               <h1>Your best moments.</h1>
             </div>
             <button className="secondary" onClick={reset}>

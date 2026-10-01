@@ -1,6 +1,6 @@
 # Local AI video clipper
 
-Turn a YouTube interview into five ranked, 15–30 second vertical clips. Choose Gemini, Anthropic, or OpenAI for analysis. No accounts, database, or cloud hosting. Captions are not burned into clips.
+Turn a YouTube interview into 1, 3, 5, or 10 ranked vertical clips. Choose 15–30, 30–60, or 60–90 second clips and use Gemini, Anthropic, or OpenAI for analysis. Generated clips include burned captions and stable face-aware framing. No accounts, database, or cloud hosting.
 
 ## Setup
 
@@ -49,21 +49,21 @@ Open http://localhost:3000. Keep the backend running while a job processes. Use 
 
 ## How it works
 
-Browser → FastAPI background job → yt-dlp video and timestamped captions → selected AI model → validation/ranking → FFmpeg center crop → five MP4 files. If captions are unavailable, FFmpeg extracts audio and Gemini creates a timestamped transcript first.
+Browser → FastAPI background job → yt-dlp video and timestamped captions → selected AI model → validation/ranking → face-aware crop and captioned FFmpeg render → MP4 files. If captions are unavailable, FFmpeg extracts audio and Gemini creates a timestamped transcript first.
 
 The standalone editor imports multiple local videos and audio files. Add sources to the timeline, split and trim clips, mix waveform-backed audio tracks with per-clip volume and fades, add crossfades, reframe for social aspect ratios, position captions directly in the preview, and export one MP4.
 
-The backend requests 15 moments with timestamps, titles, reasoning and scores from the selected model. Every score ranges from 0 (weak/absent) to 100 (exceptional). Candidates must have finite source-relative timestamps and last 15–30 seconds. Ranking uses virality, standalone, hook, then earliest start; the greedy selector rejects overlapping moments. One additional request is allowed if fewer than five survive. The system fails clearly if it cannot select five valid moments.
+The backend requests at least 15 moments with timestamps, titles, reasoning and scores from the selected model, scaling the candidate pool for larger batches. Every score ranges from 0 (weak/absent) to 100 (exceptional). Candidates must have finite source-relative timestamps and match the selected length range. Ranking uses virality, standalone, hook, then earliest start; the greedy selector rejects overlapping moments. One additional request is allowed when the requested count is not met. If at least one moment survives, the job returns the best available clips and reports the actual count.
 
 Virality is an editorial heuristic, not a prediction of views. Audio timestamp estimates can be imperfect, and a center crop can miss off-center speakers. There is no word alignment, face tracking, generated footage, or captions.
 
 ## Storage and API
 
-Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candidate JSON, atomic status JSON, and five clips. This directory is ignored by Git. Finished jobs survive restarts; interrupted jobs are marked failed. Only one job runs at a time. Refreshing the browser restores the current job.
+Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candidate JSON, atomic status JSON, and generated clips. This directory is ignored by Git. Finished jobs survive restarts; interrupted jobs are marked failed. Only one job runs at a time. Refreshing the browser restores the current job.
 
 - `GET /health`: backend health.
 - `GET /ai/models`: configured Gemini, Anthropic, and OpenAI models.
-- `POST /jobs`: `{ "youtube_url": "https://www.youtube.com/watch?v=...", "model": "gemini-fast", "instructions": "Prefer practical advice" }`, returns 202 and a job ID; 409 when busy.
+- `POST /jobs`: `{ "youtube_url": "https://www.youtube.com/watch?v=...", "model": "gemini-fast", "instructions": "Prefer practical advice", "clip_length": "short", "clip_count": 5 }`, returns 202 and a job ID; 409 when busy. Length is `short`, `medium`, or `long`; count is 1, 3, 5, or 10.
 - `GET /jobs/{id}`: actual stage, status, completed count, scores and errors.
 - `GET /jobs/{id}/clips/{index}`: MP4 preview with range support; `?download=true` downloads it.
 

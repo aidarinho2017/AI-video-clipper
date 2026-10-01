@@ -150,6 +150,12 @@ input::placeholder {
   text-align: right;
   color: #69758c;
 }
+.setting-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 12px;
+}
 .primary {
   border: 1px solid #7396ff55;
   display: inline-flex;
@@ -1001,6 +1007,9 @@ button.audio-clip { padding: 0; }
   background: #24438855;
 }
 @media (max-width: 700px) {
+  .setting-grid {
+    grid-template-columns: 1fr;
+  }
   .result-grid {
     grid-template-columns: 1fr;
     gap: 30px;

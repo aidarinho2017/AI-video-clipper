@@ -10,8 +10,8 @@ from pydantic import SecretStr
 
 from backend.config import settings
 from backend.main import app
-from backend.models import EditorExportRequest, PipelineError
-from backend.services import analysis, jobs, youtube
+from backend.models import ClipCandidate, EditorExportRequest, JobRequest, PipelineError
+from backend.services import analysis, jobs, video, youtube
 from backend.services.clip_selector import select
 from backend.services.youtube import canonical_url, transcript
 from backend.services.gemini import transcribe
@@ -45,12 +45,17 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(select([candidate(), candidate(1), candidate(20)], 60)), 2)
         self.assertEqual([c.start for c in select([candidate(30), candidate(0)], 60)], [0, 30])
         self.assertEqual(select([candidate(0)], 19), [])
+        medium = [{**candidate(0), "end": 40}, {**candidate(45), "end": 90}]
+        self.assertEqual(len(select(medium, 100, 30, 60, 1)), 1)
+        self.assertEqual(JobRequest(youtube_url="https://youtu.be/dQw4w9WgXcQ").clip_count, 5)
+        with self.assertRaises(ValueError):
+            JobRequest(youtube_url="https://youtu.be/dQw4w9WgXcQ", clip_count=2)
 
     def test_job_api_lifecycle(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(
                 settings, "gemini_api_key", SecretStr("test")):
             selected = select([candidate(i * 30) for i in range(5)], 180)
-            def fake_render(source, target, clip):
+            def fake_render(source, target, clip, transcript):
                 target.write_bytes(b"0123456789")
             with TestClient(app) as client:
                 self.assertEqual(client.get("/health").json(), {"status": "ok"})
@@ -78,6 +83,7 @@ class PipelineTests(unittest.TestCase):
                 state = client.get(f"/jobs/{job_id}").json()
                 self.assertEqual(state["status"], "completed")
                 self.assertEqual(state["completed_clips"], 5)
+                self.assertEqual((state["clip_length"], state["clip_count"]), ("short", 5))
                 response = client.get(f"/jobs/{job_id}/clips/1", headers={"Range": "bytes=0-3"})
                 self.assertEqual(response.status_code, 206)
                 self.assertEqual(response.content, b"0123")
@@ -183,6 +189,21 @@ class PipelineTests(unittest.TestCase):
             ]}))
             self.assertEqual(transcript(path), "[1.00-3.00] Hello world")
 
+    def test_generated_caption_cues_and_face_fallback(self):
+        clip = ClipCandidate.model_validate(candidate(10))
+        cues = video._caption_cues(
+            "[8.00-12.00] Before and inside\n[12.00-18.00] A useful phrase", clip)
+        self.assertEqual(cues[0][:2], (0, 2))
+        self.assertEqual(cues[-1][2], "A useful phrase")
+        capture = MagicMock()
+        capture.read.return_value = (False, None)
+        detector = MagicMock()
+        detector.empty.return_value = False
+        with patch.object(video.cv2, "VideoCapture", return_value=capture), patch.object(
+                video.cv2, "CascadeClassifier", return_value=detector):
+            self.assertEqual(video._face_center(Path("missing.mp4"), clip), 0.5)
+            capture.release.assert_called_once()
+
     def test_provider_response_shapes(self):
         self.assertEqual(analysis._parse('```json\n{"candidates": []}\n```'), {"candidates": []})
         with patch.object(settings, "anthropic_api_key", SecretStr("test")), patch.object(
@@ -201,8 +222,13 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(generate.call_count, 2)
             self.assertIn("Prefer humor", generate.call_args.args[1])
         with patch("backend.services.analysis._generate", return_value='{"candidates": []}'):
-            with self.assertRaisesRegex(PipelineError, "fewer than five"):
+            with self.assertRaisesRegex(PipelineError, "no valid"):
                 analysis.analyze("transcript", 180, lambda stage: None, "gemini-fast")
+        partial = json.dumps({"candidates": [candidate(0), candidate(30)]})
+        with patch("backend.services.analysis._generate", return_value=partial):
+            selected, _ = analysis.analyze(
+                "transcript", 180, lambda stage: None, "gemini-fast", clip_count=3)
+            self.assertEqual(len(selected), 2)
 
     def test_gemini_transcript_cleanup(self):
         client = MagicMock()
