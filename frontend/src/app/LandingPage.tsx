@@ -2,6 +2,49 @@ import type { ReactNode } from "react";
 
 const GITHUB = "https://github.com/aidarinho2017/AI-video-clipper";
 
+export type BillingPlan = {
+  id: "starter" | "pro" | "studio";
+  name: string;
+  price: number;
+  credits: number;
+  model_tiers: string[];
+  clip_counts: number[];
+  clip_lengths: string[];
+  editor: boolean;
+  configured: boolean;
+};
+
+export function PricingCards({ plans, onSelect, busy }: {
+  plans: BillingPlan[];
+  onSelect?: (plan: BillingPlan["id"]) => void;
+  busy?: string;
+}) {
+  return (
+    <div className="pricing-grid">
+      {plans.map((plan) => (
+        <article className={`pricing-card ${plan.id === "pro" ? "featured" : ""}`} key={plan.id}>
+          {plan.id === "pro" && <span className="pricing-popular">MOST POPULAR</span>}
+          <h3>{plan.name}</h3>
+          <div className="pricing-price"><strong>${plan.price}</strong><span>/ month</span></div>
+          <p>{plan.credits.toLocaleString()} credits every month</p>
+          <ul>
+            <li>Up to {Math.max(...plan.clip_counts)} clips per video</li>
+            <li>{plan.model_tiers.length > 1 ? "All AI models" : "Fast AI models"}</li>
+            <li>{plan.clip_lengths.includes("long") ? "15–90 sec clips" : plan.clip_lengths.includes("medium") ? "15–60 sec clips" : "15–30 sec clips"}</li>
+            <li>{plan.editor ? "Full video editor" : "Ready-to-post MP4 exports"}</li>
+          </ul>
+          {onSelect ? (
+            <button className={plan.id === "pro" ? "primary" : "landing-secondary"}
+                    disabled={Boolean(busy) || !plan.configured} onClick={() => onSelect(plan.id)}>
+              {busy === plan.id ? "Opening Checkout…" : plan.configured ? `Choose ${plan.name}` : "Configure Stripe price"}
+            </button>
+          ) : <a className={plan.id === "pro" ? "primary" : "landing-secondary"} href="#start">Choose {plan.name}</a>}
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function ClipPreview({ score, title, length, tone }: {
   score: number;
   title: string;
@@ -37,9 +80,10 @@ function Step({ number, title, children }: {
   );
 }
 
-export default function LandingPage({ signIn, error }: {
+export default function LandingPage({ signIn, error, plans }: {
   signIn: ReactNode;
   error?: string;
+  plans: BillingPlan[];
 }) {
   return (
     <main className="landing">
@@ -63,14 +107,14 @@ export default function LandingPage({ signIn, error }: {
           <a className="primary" href="#start">Create clips <span aria-hidden="true">↗</span></a>
           <a className="landing-secondary" href="#how">See how it works</a>
         </div>
-        <small>No editing skills required. Start with 100 credits.</small>
+        <small>No editing skills required. Plans start at $9/month.</small>
       </section>
 
       <section className="product-demo reveal" aria-label="Product preview">
         <div className="demo-topbar">
           <div><i /><i /><i /></div>
           <span>clipper / new project</span>
-          <b>100 credits</b>
+          <b>Pro · 500 credits</b>
         </div>
         <div className="demo-source">
           <div>
@@ -129,10 +173,17 @@ export default function LandingPage({ signIn, error }: {
         </div>
       </section>
 
+      <section className="landing-pricing reveal" id="pricing">
+        <span className="demo-label">SIMPLE MONTHLY PLANS</span>
+        <h2>Choose how much you create.</h2>
+        <p>No free tier, no hidden usage fees. Credits reset after each successful monthly payment.</p>
+        <PricingCards plans={plans} />
+      </section>
+
       <section className="landing-final reveal" id="start">
         <span className="demo-label">START CLIPPING</span>
         <h2>Your best clips are already<br />inside your videos.</h2>
-        <p>Sign in with Google. Your first 100 credits are on us.</p>
+        <p>Sign in with Google, choose a plan, and create your first clips.</p>
         {signIn}
         {error && <p className="landing-error" role="alert">{error}</p>}
       </section>

@@ -1,6 +1,6 @@
 # Local AI video clipper
 
-Turn a YouTube interview into 1, 3, 5, or 10 ranked vertical clips. Choose 15–30, 30–60, or 60–90 second clips and use Gemini, Anthropic, or OpenAI for analysis. Generated clips include burned captions and stable face-aware framing. Users sign in with Google and start with 100 credits.
+Turn a YouTube interview into 1, 3, 5, or 10 ranked vertical clips. Choose 15–30, 30–60, or 60–90 second clips and use Gemini, Anthropic, or OpenAI for analysis. Generated clips include burned captions and stable face-aware framing. Users sign in with Google and activate a paid test subscription.
 
 ## Setup
 
@@ -45,7 +45,21 @@ Edit `backend/.env` and add the keys for the providers you want: `GEMINI_API_KEY
 
 Create a Google OAuth 2.0 **Web application** client, add `http://localhost:3000` as an authorized JavaScript origin, then set `GOOGLE_CLIENT_ID` to its client ID. Set `AUTH_SECRET` to a random value of at least 32 characters. For HTTPS deployment, also set `AUTH_COOKIE_SECURE=true`.
 
-User accounts and balances are stored in `backend/data/users.sqlite3`. A new Google account receives 100 credits; creating a job costs one credit per requested clip (1, 3, 5, or 10). Credits are charged when the job is accepted.
+Create a PostgreSQL database and set `DATABASE_URL`, for example `postgresql://clipper:password@localhost/clipper`. The backend creates its tables at startup and stops with a clear error if the database is unavailable.
+
+### Stripe test subscriptions
+
+This integration accepts test mode only and rejects live keys and events. In the Stripe test Dashboard, create three monthly USD Prices for $9, $29, and $79 and put their IDs in `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PRO`, and `STRIPE_PRICE_STUDIO`. Set `STRIPE_SECRET_KEY` to an `sk_test_...` key.
+
+Install the [Stripe CLI](https://docs.stripe.com/stripe-cli), then forward test webhooks while the backend is running:
+
+```bash
+stripe listen --forward-to localhost:8000/billing/webhook
+```
+
+Copy the printed `whsec_...` value to `STRIPE_WEBHOOK_SECRET` and restart the backend. Enable the Stripe Customer Portal with payment-method updates and cancellation; leave plan switching disabled. Use card `4242 4242 4242 4242`, any future expiry, and any CVC in Checkout. No real money moves in test mode.
+
+User accounts, subscriptions, processed Stripe events, and balances are stored in PostgreSQL. New accounts start with zero credits. Each successful monthly invoice resets the balance to 100, 500, or 2,000 credits. A job reserves one credit per requested clip and automatically refunds failed or missing clips.
 
 The Python launcher starts both servers and shuts down both process trees on `Ctrl+C`. If your Python command has a different name, use the same command that created `backend/.venv`.
 
@@ -63,10 +77,14 @@ Virality is an editorial heuristic, not a prediction of views. Audio timestamp e
 
 ## Storage and API
 
-Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candidate JSON, atomic status JSON, and generated clips. This directory is ignored by Git. Finished jobs survive restarts; interrupted jobs are marked failed. Only one job runs at a time. Refreshing the browser restores the current job.
+Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candidate JSON, atomic status JSON, and generated clips. Editor uploads and exports are stored under the same data directory. This directory is ignored by Git and must be on persistent storage. Finished jobs survive restarts; interrupted jobs are marked failed. Only one job runs at a time. Refreshing the browser restores the current job.
 
 - `GET /health`: backend health.
 - `GET /ai/models`: configured Gemini, Anthropic, and OpenAI models.
+- `GET /billing/plans`: plan prices, credits, and entitlements.
+- `POST /billing/checkout`: authenticated Stripe test Checkout session.
+- `POST /billing/portal`: authenticated Stripe Customer Portal session.
+- `POST /billing/webhook`: signed Stripe webhook receiver.
 - `POST /jobs`: `{ "youtube_url": "https://www.youtube.com/watch?v=...", "model": "gemini-fast", "instructions": "Prefer practical advice", "clip_length": "short", "clip_count": 5 }`, returns 202 and a job ID; 409 when busy. Length is `short`, `medium`, or `long`; count is 1, 3, 5, or 10.
 - `GET /jobs/{id}`: actual stage, status, completed count, scores and errors.
 - `GET /jobs/{id}/clips/{index}`: MP4 preview with range support; `?download=true` downloads it.
@@ -76,6 +94,8 @@ Stages reflect completed work, not estimated percentages. Cutting and vertical c
 Use public videos you have permission to process. YouTube can block automated downloads or require sign-in; this app does not import browser cookies. Keep yt-dlp current if downloads stop working. Node is used by yt-dlp for YouTube's JavaScript challenges. Sources must be at least 75 seconds and within the configured duration limit. The app binds to localhost and is not intended for public exposure.
 
 ## Checks
+
+Set `TEST_DATABASE_URL` to a disposable PostgreSQL database to include the account and billing integration tests. Those tests truncate their three tables and are skipped when the variable is absent.
 
 macOS/Linux:
 

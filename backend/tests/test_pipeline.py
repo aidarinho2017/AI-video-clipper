@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from backend import auth, billing
 from backend.config import settings
 from backend.main import app
 from backend.models import ClipCandidate, EditorExportRequest, JobRequest, PipelineError
@@ -17,6 +19,19 @@ from backend.services.youtube import canonical_url, transcript
 from backend.services.gemini import transcribe
 from google.genai import errors
 
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+requires_postgres = unittest.skipUnless(TEST_DATABASE_URL, "Set TEST_DATABASE_URL to a disposable PostgreSQL database")
+
+
+def reset_database():
+    with patch.object(settings, "database_url", SecretStr(TEST_DATABASE_URL)):
+        auth.init()
+        try:
+            with auth._connect() as db:
+                db.execute("TRUNCATE credit_adjustments, billing_events, users")
+        finally:
+            auth.close()
+
 
 def candidate(start=0, score=80, **changes):
     return dict(start=start, end=start + 20, title="A complete thought", reasoning="A useful insight with context",
@@ -25,12 +40,16 @@ def candidate(start=0, score=80, **changes):
 
 
 class PipelineTests(unittest.TestCase):
-    def login(self, client, sub="google-user"):
+    def login(self, client, sub="google-user", subscribed=True):
         claims = {"sub": sub, "email": f"{sub}@example.com", "email_verified": True, "name": "Test User"}
         with patch("backend.auth.verify_google", return_value=claims):
             response = client.post("/auth/google", json={"credential": "x" * 100})
         self.assertEqual(response.status_code, 200)
-        return response.json()["user"]
+        if subscribed:
+            with auth._connect() as db:
+                db.execute("""UPDATE users SET plan='studio', subscription_status='active', credits=2000
+                            WHERE google_sub = %s""", (sub,))
+        return client.get("/auth/me").json()
 
     def test_urls(self):
         for url in ("https://youtu.be/dQw4w9WgXcQ?t=10", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://m.youtube.com/shorts/dQw4w9WgXcQ"):
@@ -38,6 +57,22 @@ class PipelineTests(unittest.TestCase):
         for url in ("file:///etc/passwd", "https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ", "https://youtube.com@localhost/watch?v=dQw4w9WgXcQ", "https://youtube.com/watch?v=short", "https://youtu.be/dQw4w9WgXcQ?list=123", "https://youtube.com:9000/watch?v=dQw4w9WgXcQ"):
             with self.subTest(url=url), self.assertRaises(PipelineError):
                 canonical_url(url)
+
+    @requires_postgres
+    def test_postgres_schema_init_is_idempotent(self):
+        reset_database()
+        with patch.object(settings, "database_url", SecretStr(TEST_DATABASE_URL)):
+            auth.init()
+            try:
+                auth.upsert_user({"sub": "old", "email": "old@example.com", "name": "Old"})
+                with auth._connect() as db:
+                    db.execute("UPDATE users SET credits = 7 WHERE google_sub = 'old'")
+                auth.init()
+                with auth._connect() as db:
+                    self.assertEqual(db.execute(
+                        "SELECT credits FROM users WHERE google_sub = 'old'").fetchone()["credits"], 7)
+            finally:
+                auth.close()
 
     def test_validation_and_ranking(self):
         candidates = [candidate(i * 30, 80 + i) for i in range(6)]
@@ -58,17 +93,20 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             JobRequest(youtube_url="https://youtu.be/dQw4w9WgXcQ", clip_count=2)
 
+    @requires_postgres
     def test_job_api_lifecycle(self):
+        reset_database()
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(
                 settings, "gemini_api_key", SecretStr("test")), patch.object(
-                settings, "auth_secret", SecretStr("test-secret-that-is-at-least-32-characters")):
+                settings, "auth_secret", SecretStr("test-secret-that-is-at-least-32-characters")), patch.object(
+                settings, "database_url", SecretStr(TEST_DATABASE_URL)):
             selected = select([candidate(i * 30) for i in range(5)], 180)
             def fake_render(source, target, clip, transcript):
                 target.write_bytes(b"0123456789")
             with TestClient(app) as client:
                 self.assertEqual(client.get("/health").json(), {"status": "ok"})
                 self.assertEqual(client.get("/auth/me").status_code, 401)
-                self.assertEqual(self.login(client)["credits"], 100)
+                self.assertEqual(self.login(client)["credits"], 2000)
                 catalog = client.get("/ai/models").json()
                 self.assertEqual(catalog["default_model"], "gemini-fast")
                 self.assertEqual(len(catalog["models"]), 6)
@@ -89,7 +127,7 @@ class PipelineTests(unittest.TestCase):
                 with patch("backend.services.youtube.download", return_value=(Path(temp) / "source.mp4", Path(temp) / "source.en.json3")), patch("backend.services.youtube.transcript", return_value="[0-180] transcript"), patch("backend.services.video.probe", return_value=180), patch("backend.services.analysis.analyze", return_value=(selected, [])), patch("backend.services.video.render", side_effect=fake_render):
                     response = client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ"})
                 self.assertEqual(response.status_code, 202)
-                self.assertEqual(response.json()["credits"], 95)
+                self.assertEqual(response.json()["credits"], 1995)
                 job_id = response.json()["id"]
                 state = client.get(f"/jobs/{job_id}").json()
                 self.assertEqual(state["status"], "completed")
@@ -106,16 +144,70 @@ class PipelineTests(unittest.TestCase):
                 state = jobs.read(failed["id"])
                 self.assertEqual(state["status"], "failed")
                 self.assertEqual(state["error"], "Video unavailable")
+                self.assertEqual(client.get("/auth/me").json()["credits"], 1995)
                 self.assertFalse(jobs.lock.locked())
                 queued = jobs.create("unused")
                 jobs.recover()
                 self.assertEqual(jobs.read(queued["id"])["status"], "failed")
 
+    @requires_postgres
+    def test_paid_plans_and_idempotent_webhooks(self):
+        reset_database()
+        secret = SecretStr("test-secret-that-is-at-least-32-characters")
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(
+                settings, "auth_secret", secret), patch.object(
+                settings, "gemini_api_key", SecretStr("test")), patch.object(
+                settings, "stripe_secret_key", SecretStr("sk_test_fake")), patch.object(
+                settings, "stripe_webhook_secret", SecretStr("whsec_fake")), patch.object(
+                settings, "stripe_price_starter", "price_starter"), patch.object(
+                settings, "database_url", SecretStr(TEST_DATABASE_URL)), TestClient(app) as client:
+            user = self.login(client, subscribed=False)
+            self.assertEqual((user["credits"], user["subscription_status"]), (0, "inactive"))
+            self.assertEqual(client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ"}).status_code, 403)
+            with patch("backend.billing.stripe.Customer.create", return_value=SimpleNamespace(id="cus_test")), patch(
+                    "backend.billing.stripe.checkout.Session.create",
+                    return_value=SimpleNamespace(id="cs_test", url="https://checkout.test/session")):
+                checkout = client.post("/billing/checkout", json={"plan": "starter"})
+            self.assertEqual(checkout.json()["url"], "https://checkout.test/session")
+            with patch("backend.billing.stripe.checkout.Session.retrieve",
+                       return_value=SimpleNamespace(status="open", url="https://checkout.test/session")):
+                duplicate = client.post("/billing/checkout", json={"plan": "starter"})
+            self.assertEqual(duplicate.json()["url"], "https://checkout.test/session")
+            paid = {
+                "id": "evt_paid", "type": "invoice.paid", "livemode": False,
+                "data": {"object": {"customer": "cus_test", "subscription": "sub_test",
+                                     "lines": {"data": [{"price": {"id": "price_starter"}}]}}},
+            }
+            billing.handle_event(paid)
+            user = client.get("/auth/me").json()
+            self.assertEqual((user["plan"], user["credits"], user["subscription_status"]),
+                             ("starter", 100, "active"))
+            self.assertEqual(client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ",
+                                                        "clip_count": 5}).status_code, 403)
+            self.assertEqual(client.post("/editor/sources", content=b"video").status_code, 403)
+            auth.charge("google-user", 1)
+            billing.handle_event(paid)
+            self.assertEqual(client.get("/auth/me").json()["credits"], 99)
+            self.assertEqual(auth.refund_once("google-user", 2, "test-refund"), 2)
+            self.assertEqual(auth.refund_once("google-user", 3, "test-refund"), 1)
+            self.assertEqual(auth.refund_once("google-user", 2, "test-refund"), 0)
+            self.assertEqual(client.get("/auth/me").json()["credits"], 102)
+            failed = {"id": "evt_failed", "type": "invoice.payment_failed", "livemode": False,
+                      "data": {"object": {"customer": "cus_test"}}}
+            billing.handle_event(failed)
+            self.assertEqual(client.get("/auth/me").json()["subscription_status"], "past_due")
+            with patch("backend.billing.stripe.Webhook.construct_event", side_effect=ValueError):
+                self.assertEqual(client.post("/billing/webhook", content=b"{}",
+                                             headers={"Stripe-Signature": "bad"}).status_code, 400)
+
+    @requires_postgres
     def test_editor_api_lifecycle(self):
+        reset_database()
         metadata = {"kind": "video", "duration": 12.0, "width": 640, "height": 360, "has_audio": True}
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(
                 settings, "max_upload_bytes", 100), patch.object(
-                settings, "auth_secret", SecretStr("test-secret-that-is-at-least-32-characters")):
+                settings, "auth_secret", SecretStr("test-secret-that-is-at-least-32-characters")), patch.object(
+                settings, "database_url", SecretStr(TEST_DATABASE_URL)):
             def fake_render(sources, audio_sources, target, edit):
                 target.write_bytes(b"edited")
             with patch("backend.services.video.probe_source", return_value=metadata), patch("backend.services.video.probe_media", return_value=metadata), patch("backend.services.video.render_edit", side_effect=fake_render), TestClient(app) as client:

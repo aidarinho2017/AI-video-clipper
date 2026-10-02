@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     auth_secret: SecretStr = SecretStr("")
     auth_cookie_secure: bool = False
+    database_url: SecretStr = SecretStr("")
+    stripe_secret_key: SecretStr = SecretStr("")
+    stripe_webhook_secret: SecretStr = SecretStr("")
+    stripe_price_starter: str = ""
+    stripe_price_pro: str = ""
+    stripe_price_studio: str = ""
+    app_url: str = "http://localhost:3000"
     max_video_seconds: int = Field(default=7200, ge=75)
     max_upload_bytes: int = Field(default=2_147_483_648, gt=0)
     data_dir: Path = ROOT / "data"

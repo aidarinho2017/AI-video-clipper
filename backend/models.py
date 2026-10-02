@@ -41,6 +41,10 @@ class GoogleCredential(BaseModel):
     credential: str = Field(min_length=100, max_length=10000)
 
 
+class CheckoutRequest(BaseModel):
+    plan: Literal["starter", "pro", "studio"]
+
+
 class TranscriptSegment(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False, str_strip_whitespace=True)
     start: float = Field(ge=0)

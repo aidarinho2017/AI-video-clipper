@@ -570,6 +570,163 @@ html {
   padding: 30px 0 175px;
   text-align: center;
 }
+.landing-pricing {
+  width: min(1080px, calc(100% - 48px));
+  margin: 0 auto 190px;
+  text-align: center;
+}
+.landing-pricing > h2 {
+  margin: 15px 0 0;
+  font-size: clamp(37px, 5vw, 58px);
+  font-weight: 500;
+  letter-spacing: -0.055em;
+}
+.landing-pricing > p {
+  margin: 18px auto 42px;
+  color: #747f91;
+  font-size: 13px;
+}
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  text-align: left;
+}
+.pricing-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 405px;
+  padding: 30px;
+  border: 1px solid #ffffff13;
+  border-radius: 15px;
+  background: #0d1118;
+  transition: transform 0.25s, border-color 0.25s, background 0.25s;
+}
+.pricing-card:hover {
+  transform: translateY(-4px);
+  border-color: #6c91f548;
+  background: #10151f;
+}
+.pricing-card.featured {
+  border-color: #668cf44c;
+  box-shadow: 0 20px 65px #204da316;
+}
+.pricing-popular {
+  position: absolute;
+  top: 17px;
+  right: 17px;
+  color: #84a5ff;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .15em;
+}
+.pricing-card h3 {
+  margin: 0 0 24px;
+  font-size: 17px;
+  font-weight: 500;
+}
+.pricing-price {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.pricing-price strong {
+  font-size: 42px;
+  font-weight: 500;
+  letter-spacing: -.05em;
+}
+.pricing-price span,
+.pricing-card > p {
+  color: #6f798b;
+  font-size: 11px;
+}
+.pricing-card > p { margin: 8px 0 26px; }
+.pricing-card ul {
+  flex: 1;
+  margin: 0 0 28px;
+  padding: 20px 0 0;
+  border-top: 1px solid #ffffff0d;
+  list-style: none;
+}
+.pricing-card li {
+  position: relative;
+  margin: 0 0 14px;
+  padding-left: 18px;
+  color: #9aa5b7;
+  font-size: 11px;
+}
+.pricing-card li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  color: #7297fb;
+}
+.pricing-card .primary,
+.pricing-card .landing-secondary {
+  width: 100%;
+  min-height: 45px;
+  justify-content: center;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.subscription-page {
+  min-height: 100svh;
+  padding: 0 24px 80px;
+  background: radial-gradient(ellipse 70% 42% at 50% 0%, #173a7a24, transparent 70%), #07090e;
+}
+.subscription-page > header {
+  width: min(1120px, 100%);
+  height: 76px;
+  margin: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #ffffff0d;
+}
+.subscription-page > header > div {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: #707b8e;
+  font-size: 11px;
+}
+.subscription-page > section {
+  width: min(1040px, 100%);
+  margin: auto;
+  padding-top: 82px;
+  text-align: center;
+}
+.subscription-page h1 {
+  margin: 15px auto 0;
+  font-size: clamp(40px, 6vw, 65px);
+  font-weight: 500;
+  letter-spacing: -.055em;
+}
+.subscription-page section > p {
+  margin: 18px 0 44px;
+  color: #7b8597;
+  font-size: 14px;
+}
+.subscription-page .pricing-grid { margin-top: 30px; }
+.billing-notice,
+.billing-error {
+  width: fit-content;
+  max-width: 600px;
+  margin: 0 auto 18px;
+  padding: 11px 15px;
+  border: 1px solid #6d91f43b;
+  border-radius: 9px;
+  background: #18336c30;
+  color: #a9bdf1;
+  font-size: 12px;
+}
+.billing-error {
+  border-color: #b4515144;
+  background: #3d1d2480;
+  color: #ffc1bc;
+}
+.billing-manage { margin: 10px auto; }
 .landing-final h2 { font-size: clamp(43px, 6vw, 70px); }
 .landing-final > p { margin: 23px 0 28px; }
 .landing-final .google-button { min-height: 44px; }
@@ -1658,6 +1815,12 @@ button.audio-clip { padding: 0; }
   .editor-callout { width: calc(100% - 24px); grid-template-columns: 1fr; gap: 50px; padding: 40px 24px 24px; margin-bottom: 120px; }
   .editor-mini-body { height: 190px; grid-template-columns: 50px 1fr 60px; }
   .landing-final { padding-bottom: 110px; }
+  .landing-pricing { width: calc(100% - 30px); margin-bottom: 120px; }
+  .pricing-grid { grid-template-columns: 1fr; }
+  .pricing-card { min-height: 0; }
+  .subscription-page { padding: 0 15px 50px; }
+  .subscription-page > header > div > span { display: none; }
+  .subscription-page > section { padding-top: 55px; }
   .landing-footer { width: calc(100% - 30px); grid-template-columns: 1fr auto; }
   .landing-footer > div { display: none; }
   .setting-grid {

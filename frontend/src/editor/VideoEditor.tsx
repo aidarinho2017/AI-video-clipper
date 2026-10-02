@@ -130,9 +130,16 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   const [exportStatus, setExportStatus] = useState("");
   const [exportSnapshot, setExportSnapshot] = useState("");
   const [error, setError] = useState("");
+  const [hasAccess, setHasAccess] = useState<boolean>();
 
   useEffect(() => {
-    if (!jobId || !clipIndex) return;
+    jsonRequest("/auth/me")
+      .then((user) => setHasAccess(Boolean(user.subscription_status === "active" && user.entitlements?.editor)))
+      .catch((reason) => { setError(reason.message); setHasAccess(false); });
+  }, []);
+
+  useEffect(() => {
+    if (!hasAccess || !jobId || !clipIndex) return;
     jsonRequest(`/jobs/${jobId}`)
       .then((job) => {
         const clip = job.clips?.find((value: { index: number }) => value.index === clipIndex);
@@ -146,7 +153,7 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
       })
       .catch((reason) => setError(reason.message))
       .finally(() => setBusy(false));
-  }, [jobId, clipIndex]);
+  }, [hasAccess, jobId, clipIndex]);
 
   useEffect(() => {
     if (!timeline.current) return;
@@ -623,6 +630,21 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
       setError((reason as Error).message);
     }
   }
+
+  if (hasAccess === undefined) return <main className="editor-empty"><p>Checking subscription…</p></main>;
+
+  if (!hasAccess) return (
+    <main className="editor-empty">
+      <Link href="/" className="editor-home">← AI Video Clipper</Link>
+      <section className="panel editor-picker">
+        <div className="eyebrow">PRO OR STUDIO</div>
+        <h1>Upgrade to use the editor.</h1>
+        <p>The full timeline editor is included with Pro and Studio plans.</p>
+        <Link href="/" className="primary">View plans ↗</Link>
+        {error && <p role="alert" className="editor-inline-error">{error}</p>}
+      </section>
+    </main>
+  );
 
   if (!editor)
     return (

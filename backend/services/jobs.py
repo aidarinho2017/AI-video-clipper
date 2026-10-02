@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
+from .. import auth
 from ..config import settings
 from ..models import PipelineError
 from . import analysis, gemini, video, youtube
@@ -29,7 +30,10 @@ def recover():
         try:
             state = json.loads(path.read_text())
             if state["status"] in {"queued", "processing"}:
+                refunded = auth.refund_once(state.get("owner_id", ""), state.get("credits_reserved", 0),
+                                            f"job:{state['id']}:refund") if state.get("owner_id") else 0
                 state.update(status="failed", error="Backend restarted during processing. Please generate again.")
+                state["credits_refunded"] = refunded
                 save(path.parent, state)
         except (OSError, ValueError, KeyError):
             log.exception("Could not recover job %s", path.parent.name)
@@ -42,7 +46,8 @@ def create(url: str, model_id: str = analysis.DEFAULT_MODEL, clip_length: str = 
     folder.mkdir(parents=True)
     state = dict(id=job_id, status="queued", stage="downloading", model=model_id,
                  clip_length=clip_length, clip_count=clip_count,
-                 owner_id=owner_id, completed_clips=0, clips=[], error=None)
+                 owner_id=owner_id, credits_reserved=clip_count, credits_refunded=0,
+                 completed_clips=0, clips=[], error=None)
     save(folder, state)
     return state
 
@@ -83,10 +88,14 @@ def process(job_id: str, url: str, model_id: str = analysis.DEFAULT_MODEL, instr
             state["completed_clips"] = index
             save(folder, state)
         state.update(status="completed", stage="completed")
+        state["credits_refunded"] = auth.refund_once(
+            state["owner_id"], clip_count - len(selected), f"job:{job_id}:refund")
         save(folder, state)
     except Exception as exc:
         log.exception("Job %s failed", job_id)
         if state is not None:
+            state["credits_refunded"] = auth.refund_once(
+                state["owner_id"], state.get("credits_reserved", clip_count), f"job:{job_id}:refund")
             state.update(status="failed", error=str(exc) if isinstance(exc, PipelineError) else "Processing failed unexpectedly. Check the backend log and try again.")
             save(folder, state)
     finally:
