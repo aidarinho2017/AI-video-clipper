@@ -37,6 +37,10 @@ class JobRequest(BaseModel):
     clip_count: Literal[1, 3, 5, 10] = 5
 
 
+class GoogleCredential(BaseModel):
+    credential: str = Field(min_length=100, max_length=10000)
+
+
 class TranscriptSegment(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False, str_strip_whitespace=True)
     start: float = Field(ge=0)

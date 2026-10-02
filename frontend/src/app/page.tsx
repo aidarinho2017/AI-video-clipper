@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Script from "next/script";
+import LandingPage from "./LandingPage";
 
 const API = "http://localhost:8000";
 const STORAGE = "clipper-job";
@@ -32,7 +34,9 @@ type Job = {
   clip_count?: 1 | 3 | 5 | 10;
   clips: Clip[];
   error: string | null;
+  credits?: number;
 };
+type User = { email: string; name: string; picture: string; credits: number };
 type ModelOption = {
   id: string;
   label: string;
@@ -50,6 +54,7 @@ async function request<T = Job>(path: string, options?: RequestInit): Promise<T>
   try {
     response = await fetch(`${API}${path}`, {
       ...options,
+      credentials: "include",
       signal: AbortSignal.timeout(15000),
     });
   } catch {
@@ -57,7 +62,7 @@ async function request<T = Job>(path: string, options?: RequestInit): Promise<T>
       "Cannot reach the backend. Make sure it is running on localhost:8000.",
     );
   }
-  const data = await response.json();
+  const data = response.status === 204 ? undefined : await response.json();
   if (!response.ok)
     throw new Error(
       typeof data.detail === "string"
@@ -67,7 +72,51 @@ async function request<T = Job>(path: string, options?: RequestInit): Promise<T>
   return data;
 }
 
+function GoogleSignIn({ clientId, onLogin, onError }: {
+  clientId: string;
+  onLogin: (user: User) => void;
+  onError: (message: string) => void;
+}) {
+  const [ready, setReady] = useState(false);
+  const button = (element: HTMLDivElement | null) => {
+    if (!element || !ready || !window.google) return;
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+      callback: async ({ credential }) => {
+        try {
+          const result = await request<{ user: User }>("/auth/google", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ credential }),
+          });
+          onLogin(result.user);
+        } catch (error) {
+          onError((error as Error).message);
+        }
+      },
+    });
+    element.replaceChildren();
+    window.google.accounts.id.renderButton(element, { theme: "filled_black", size: "large" });
+  };
+  return <>
+    <Script src="https://accounts.google.com/gsi/client" onReady={() => setReady(true)} />
+    <div className="google-button" ref={button} />
+  </>;
+}
+
+declare global {
+  interface Window {
+    google?: { accounts: { id: {
+      initialize(config: { client_id: string; callback(response: { credential: string }): void }): void;
+      renderButton(element: HTMLElement, options: { theme: string; size: string }): void;
+      disableAutoSelect(): void;
+    } } };
+  }
+}
+
 export default function Home() {
+  const [user, setUser] = useState<User | null>();
+  const [googleClientId, setGoogleClientId] = useState("");
   const [url, setUrl] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
@@ -81,6 +130,13 @@ export default function Home() {
     "short",
   );
   const [clipCount, setClipCount] = useState<1 | 3 | 5 | 10>(5);
+
+  useEffect(() => {
+    request<{ google_client_id: string }>("/auth/config")
+      .then((config) => setGoogleClientId(config.google_client_id))
+      .catch((err) => setError(err.message));
+    request<User>("/auth/me").then(setUser).catch(() => setUser(null));
+  }, []);
 
   useEffect(() => {
     request<ModelCatalog>("/ai/models")
@@ -99,6 +155,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!user) return;
     const id = localStorage.getItem(STORAGE);
     if (!id) return;
     let active = true;
@@ -115,7 +172,7 @@ export default function Home() {
     return () => {
       active = false;
     };
-  }, [restore]);
+  }, [restore, user]);
 
   const jobId = job?.id;
   const processing = job?.status === "queued" || job?.status === "processing";
@@ -160,6 +217,7 @@ export default function Home() {
       });
       localStorage.setItem(STORAGE, data.id);
       setJob(data);
+      setUser((current) => current && data.credits !== undefined ? { ...current, credits: data.credits } : current);
       setSelected(0);
     } catch (err) {
       setError((err as Error).message);
@@ -174,11 +232,29 @@ export default function Home() {
     setError("");
     setSelected(0);
   }
+
+  async function logout() {
+    await request("/auth/logout", { method: "POST" });
+    window.google?.accounts.id.disableAutoSelect();
+    reset();
+    setUser(null);
+  }
   const clip = job?.clips[selected];
+
+  if (user === undefined) return <main className="shell"><p>Loading…</p></main>;
+
+  if (!user) return <LandingPage error={error} signIn={googleClientId
+    ? <GoogleSignIn clientId={googleClientId} onLogin={setUser} onError={setError} />
+    : <p className="landing-error">Add GOOGLE_CLIENT_ID to backend/.env.</p>} />;
 
   return (
     <main className={job?.status === "completed" ? "results-shell" : "shell"}>
       <div className="ambient" aria-hidden="true" />
+      <div className="account-bar">
+        <span>{user.name}</span>
+        <strong>{user.credits} credits</strong>
+        <button className="text-button" onClick={logout}>Sign out</button>
+      </div>
       {error && (
         <div role="alert" className="error">
           {error}{" "}
@@ -285,9 +361,9 @@ export default function Home() {
             </fieldset>
             <button
               className="primary"
-              disabled={busy || !models.some((item) => item.id === model && item.configured)}
+              disabled={busy || user.credits < clipCount || !models.some((item) => item.id === model && item.configured)}
             >
-              {busy ? "Starting…" : "Generate Clips"}
+              {busy ? "Starting…" : `Generate Clips · ${clipCount} credit${clipCount === 1 ? "" : "s"}`}
               <span aria-hidden="true">↗</span>
             </button>
             <a className="secondary editor-entry" href="/editor">

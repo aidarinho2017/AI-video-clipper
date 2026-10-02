@@ -88,7 +88,7 @@ function initialEditor(mediaId: string, start: number, end: number): EditorState
 }
 
 async function jsonRequest(path: string, options?: RequestInit) {
-  const response = await fetch(`${API}${path}`, options);
+  const response = await fetch(`${API}${path}`, { ...options, credentials: "include" });
   const data = await response.json();
   if (!response.ok)
     throw new Error(typeof data.detail === "string" ? data.detail : "Request failed.");

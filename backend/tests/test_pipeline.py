@@ -25,6 +25,13 @@ def candidate(start=0, score=80, **changes):
 
 
 class PipelineTests(unittest.TestCase):
+    def login(self, client, sub="google-user"):
+        claims = {"sub": sub, "email": f"{sub}@example.com", "email_verified": True, "name": "Test User"}
+        with patch("backend.auth.verify_google", return_value=claims):
+            response = client.post("/auth/google", json={"credential": "x" * 100})
+        self.assertEqual(response.status_code, 200)
+        return response.json()["user"]
+
     def test_urls(self):
         for url in ("https://youtu.be/dQw4w9WgXcQ?t=10", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://m.youtube.com/shorts/dQw4w9WgXcQ"):
             self.assertEqual(canonical_url(url), "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
@@ -53,12 +60,15 @@ class PipelineTests(unittest.TestCase):
 
     def test_job_api_lifecycle(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(
-                settings, "gemini_api_key", SecretStr("test")):
+                settings, "gemini_api_key", SecretStr("test")), patch.object(
+                settings, "auth_secret", SecretStr("test-secret-that-is-at-least-32-characters")):
             selected = select([candidate(i * 30) for i in range(5)], 180)
             def fake_render(source, target, clip, transcript):
                 target.write_bytes(b"0123456789")
             with TestClient(app) as client:
                 self.assertEqual(client.get("/health").json(), {"status": "ok"})
+                self.assertEqual(client.get("/auth/me").status_code, 401)
+                self.assertEqual(self.login(client)["credits"], 100)
                 catalog = client.get("/ai/models").json()
                 self.assertEqual(catalog["default_model"], "gemini-fast")
                 self.assertEqual(len(catalog["models"]), 6)
@@ -79,6 +89,7 @@ class PipelineTests(unittest.TestCase):
                 with patch("backend.services.youtube.download", return_value=(Path(temp) / "source.mp4", Path(temp) / "source.en.json3")), patch("backend.services.youtube.transcript", return_value="[0-180] transcript"), patch("backend.services.video.probe", return_value=180), patch("backend.services.analysis.analyze", return_value=(selected, [])), patch("backend.services.video.render", side_effect=fake_render):
                     response = client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ"})
                 self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json()["credits"], 95)
                 job_id = response.json()["id"]
                 state = client.get(f"/jobs/{job_id}").json()
                 self.assertEqual(state["status"], "completed")
@@ -102,10 +113,13 @@ class PipelineTests(unittest.TestCase):
 
     def test_editor_api_lifecycle(self):
         metadata = {"kind": "video", "duration": 12.0, "width": 640, "height": 360, "has_audio": True}
-        with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(settings, "max_upload_bytes", 100):
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, "data_dir", Path(temp)), patch.object(
+                settings, "max_upload_bytes", 100), patch.object(
+                settings, "auth_secret", SecretStr("test-secret-that-is-at-least-32-characters")):
             def fake_render(sources, audio_sources, target, edit):
                 target.write_bytes(b"edited")
             with patch("backend.services.video.probe_source", return_value=metadata), patch("backend.services.video.probe_media", return_value=metadata), patch("backend.services.video.render_edit", side_effect=fake_render), TestClient(app) as client:
+                self.login(client)
                 uploaded = client.post("/editor/sources", content=b"video", headers={"Content-Type": "video/mp4"})
                 self.assertEqual(uploaded.status_code, 201)
                 source_id = uploaded.json()["id"]

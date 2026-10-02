@@ -1,6 +1,6 @@
 # Local AI video clipper
 
-Turn a YouTube interview into 1, 3, 5, or 10 ranked vertical clips. Choose 15–30, 30–60, or 60–90 second clips and use Gemini, Anthropic, or OpenAI for analysis. Generated clips include burned captions and stable face-aware framing. No accounts, database, or cloud hosting.
+Turn a YouTube interview into 1, 3, 5, or 10 ranked vertical clips. Choose 15–30, 30–60, or 60–90 second clips and use Gemini, Anthropic, or OpenAI for analysis. Generated clips include burned captions and stable face-aware framing. Users sign in with Google and start with 100 credits.
 
 ## Setup
 
@@ -42,6 +42,10 @@ py start.py
 ```
 
 Edit `backend/.env` and add the keys for the providers you want: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and/or `OPENAI_API_KEY`. Gemini is the default and the transcription fallback when a video has no YouTube captions. Never put keys in the frontend. `MAX_VIDEO_SECONDS` defaults to 7200.
+
+Create a Google OAuth 2.0 **Web application** client, add `http://localhost:3000` as an authorized JavaScript origin, then set `GOOGLE_CLIENT_ID` to its client ID. Set `AUTH_SECRET` to a random value of at least 32 characters. For HTTPS deployment, also set `AUTH_COOKIE_SECURE=true`.
+
+User accounts and balances are stored in `backend/data/users.sqlite3`. A new Google account receives 100 credits; creating a job costs one credit per requested clip (1, 3, 5, or 10). Credits are charged when the job is accepted.
 
 The Python launcher starts both servers and shuts down both process trees on `Ctrl+C`. If your Python command has a different name, use the same command that created `backend/.venv`.
 

@@ -36,13 +36,13 @@ def recover():
 
 
 def create(url: str, model_id: str = analysis.DEFAULT_MODEL, clip_length: str = "short",
-           clip_count: int = 5) -> dict:
+           clip_count: int = 5, owner_id: str = "") -> dict:
     job_id = str(uuid4())
     folder = settings.data_dir / job_id
     folder.mkdir(parents=True)
     state = dict(id=job_id, status="queued", stage="downloading", model=model_id,
                  clip_length=clip_length, clip_count=clip_count,
-                 completed_clips=0, clips=[], error=None)
+                 owner_id=owner_id, completed_clips=0, clips=[], error=None)
     save(folder, state)
     return state
 

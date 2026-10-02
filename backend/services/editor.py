@@ -42,10 +42,14 @@ def job_source(job_id: UUID) -> Path:
     return sources[0]
 
 
-def resolve_source(source: UploadSource | JobSource) -> Path:
+def resolve_source(source: UploadSource | JobSource, owner_id: str | None = None) -> Path:
     if isinstance(source, UploadSource):
-        path, _ = read_source(source.id)
+        path, metadata = read_source(source.id)
+        if owner_id and metadata.get("owner_id") != owner_id:
+            raise FileNotFoundError
         return path
+    if owner_id and jobs.read(str(source.job_id)).get("owner_id") != owner_id:
+        raise FileNotFoundError
     return job_source(source.job_id)
 
 
@@ -69,13 +73,13 @@ def job_waveform(job_id: UUID) -> Path:
     return target
 
 
-def create_export(edit: EditorExportRequest) -> dict:
+def create_export(edit: EditorExportRequest, owner_id: str = "") -> dict:
     for segment in edit.segments:
-        if segment.source_end > video.probe_media(resolve_source(segment.source))["duration"]:
+        if segment.source_end > video.probe_media(resolve_source(segment.source, owner_id))["duration"]:
             raise PipelineError("A video segment exceeds its source duration.")
     for track in edit.audio_tracks:
         for clip in track.clips:
-            metadata = video.probe_source(resolve_source(clip.source))
+            metadata = video.probe_source(resolve_source(clip.source, owner_id))
             if not metadata["has_audio"]:
                 raise PipelineError("An audio clip source contains no audio.")
             if clip.source_end > metadata["duration"]:
@@ -83,7 +87,7 @@ def create_export(edit: EditorExportRequest) -> dict:
     export_id = uuid4()
     folder = settings.data_dir / "editor-exports" / str(export_id)
     folder.mkdir(parents=True)
-    state = {"id": str(export_id), "status": "queued", "error": None}
+    state = {"id": str(export_id), "owner_id": owner_id, "status": "queued", "error": None}
     _save(folder, state)
     return state
 
