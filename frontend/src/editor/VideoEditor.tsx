@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiRequest, mediaUrl } from "../lib/api";
 
 import {
   MIN_CAPTION_DURATION,
@@ -35,7 +36,6 @@ import {
   type VideoSegment,
 } from "./editor-state";
 
-const API = "http://localhost:8000";
 const OUTPUT_HEIGHT = { "9:16": 1280, "16:9": 720, "1:1": 720 } as const;
 
 type SourceMetadata = {
@@ -46,11 +46,14 @@ type SourceMetadata = {
   has_audio: boolean;
 };
 
+type ExportState = { id: string; status: string; error?: string };
+
 type MediaItem = {
   id: string;
   name: string;
   source: EditorSource;
   url: string;
+  waveformUrl: string;
   metadata: SourceMetadata | null;
 };
 
@@ -87,19 +90,8 @@ function initialEditor(mediaId: string, start: number, end: number): EditorState
   };
 }
 
-async function jsonRequest(path: string, options?: RequestInit) {
-  const response = await fetch(`${API}${path}`, { ...options, credentials: "include" });
-  const data = await response.json();
-  if (!response.ok)
-    throw new Error(typeof data.detail === "string" ? data.detail : "Request failed.");
-  return data;
-}
-
 function waveformUrl(item?: MediaItem) {
-  if (!item?.metadata?.has_audio) return "";
-  return item.source.kind === "upload"
-    ? `${API}/editor/sources/${item.source.id}/waveform`
-    : `${API}/editor/jobs/${item.source.jobId}/waveform`;
+  return item?.metadata?.has_audio ? item.waveformUrl : "";
 }
 
 export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clipIndex?: number }) {
@@ -128,24 +120,29 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   const [busy, setBusy] = useState(Boolean(jobId && clipIndex));
   const [exportId, setExportId] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [exportUrl, setExportUrl] = useState("");
   const [exportSnapshot, setExportSnapshot] = useState("");
   const [error, setError] = useState("");
   const [hasAccess, setHasAccess] = useState<boolean>();
 
   useEffect(() => {
-    jsonRequest("/auth/me")
+    apiRequest<{ subscription_status: string; entitlements?: { editor?: boolean } }>("/auth/me")
       .then((user) => setHasAccess(Boolean(user.subscription_status === "active" && user.entitlements?.editor)))
       .catch((reason) => { setError(reason.message); setHasAccess(false); });
   }, []);
 
   useEffect(() => {
     if (!hasAccess || !jobId || !clipIndex) return;
-    jsonRequest(`/jobs/${jobId}`)
-      .then((job) => {
+    apiRequest<{ clips?: Array<{ index: number; start: number; end: number }> }>(`/jobs/${jobId}`)
+      .then(async (job) => {
         const clip = job.clips?.find((value: { index: number }) => value.index === clipIndex);
         if (!clip) throw new Error("Generated clip not found.");
         const mediaId = crypto.randomUUID();
-        const item: MediaItem = { id: mediaId, name: "AI source video", source: { kind: "job", jobId }, url: `${API}/editor/jobs/${jobId}/source`, metadata: null };
+        const [url, waveform] = await Promise.all([
+          mediaUrl(`/editor/jobs/${jobId}/source`),
+          mediaUrl(`/editor/jobs/${jobId}/waveform`),
+        ]);
+        const item: MediaItem = { id: mediaId, name: "AI source video", source: { kind: "job", jobId }, url, waveformUrl: waveform, metadata: null };
         const next = initialEditor(mediaId, clip.start, clip.end);
         setMedia([item]);
         setEditor(next);
@@ -238,7 +235,7 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
   useEffect(() => {
     if (!exportId || exportStatus === "completed" || exportStatus === "failed") return;
     const timer = setInterval(() => {
-      jsonRequest(`/editor/exports/${exportId}`)
+      apiRequest<ExportState>(`/editor/exports/${exportId}`)
         .then((state) => {
           setExportStatus(state.status);
           if (state.status === "failed") setError(state.error || "Export failed.");
@@ -246,6 +243,12 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
         .catch((reason) => setError(reason.message));
     }, 1500);
     return () => clearInterval(timer);
+  }, [exportId, exportStatus]);
+
+  useEffect(() => {
+    if (!exportId || exportStatus !== "completed") return;
+    mediaUrl(`/editor/exports/${exportId}/video`).then(setExportUrl)
+      .catch((reason) => setError(reason.message));
   }, [exportId, exportStatus]);
 
   async function upload(files?: FileList | null, expected: "video" | "audio" = "video") {
@@ -259,13 +262,17 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
     try {
       const imported: MediaItem[] = [];
       for (const file of Array.from(files)) {
-        const metadata: SourceMetadata & { id: string } = await jsonRequest("/editor/sources", {
+        const metadata = await apiRequest<SourceMetadata & { id: string }>("/editor/sources", {
           method: "POST",
           headers: { "Content-Type": file.type || "application/octet-stream" },
           body: file,
         });
         if (metadata.kind !== expected) throw new Error(`Choose an ${expected} file.`);
-        imported.push({ id: crypto.randomUUID(), name: file.name, source: { kind: "upload", id: metadata.id }, url: `${API}/editor/sources/${metadata.id}`, metadata });
+        const [url, waveform] = await Promise.all([
+          mediaUrl(`/editor/sources/${metadata.id}`),
+          mediaUrl(`/editor/sources/${metadata.id}/waveform`),
+        ]);
+        imported.push({ id: crypto.randomUUID(), name: file.name, source: { kind: "upload", id: metadata.id }, url, waveformUrl: waveform, metadata });
       }
       setMedia((current) => [...current, ...imported]);
       if (expected === "audio") {
@@ -571,9 +578,10 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
     }
     setError("");
     setExportStatus("queued");
+    setExportUrl("");
     setExportSnapshot(JSON.stringify(editor));
     try {
-      const state = await jsonRequest("/editor/exports", {
+      const state = await apiRequest<ExportState>("/editor/exports", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -699,8 +707,8 @@ export default function VideoEditor({ jobId, clipIndex }: { jobId?: string; clip
         <Link href="/" className="editor-home">← AI Video Clipper</Link>
         <div>
           {(exportStatus === "queued" || exportStatus === "processing") && <span className="export-status">Export {exportStatus}…</span>}
-          {exportIsCurrent ? (
-            <a className="primary" href={`${API}/editor/exports/${exportId}/video?download=true`}>Download MP4 ↓</a>
+          {exportIsCurrent && exportUrl ? (
+            <a className="primary" href={`${exportUrl}&download=true`}>Download MP4 ↓</a>
           ) : (
             <button className="primary" onClick={exportVideo} disabled={exportStatus === "queued" || exportStatus === "processing"}>Export Video ↗</button>
           )}

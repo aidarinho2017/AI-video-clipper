@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 from . import auth, billing
 from .config import settings
-from .models import CheckoutRequest, EditorExportRequest, GoogleCredential, JobRequest, PipelineError
+from .models import CheckoutRequest, EditorExportRequest, GoogleCredential, JobRequest, MediaTokenRequest, PipelineError
 from .services import analysis, editor, jobs, video
 from .services.youtube import canonical_url
 
@@ -32,10 +32,10 @@ app = FastAPI(title="Local AI Video Clipper", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[settings.app_url.rstrip("/")],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Range"],
+    allow_headers=["Authorization", "Content-Type", "Range"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Disposition"],
 )
 
@@ -52,14 +52,22 @@ def auth_config():
 @app.post("/auth/google")
 def google_login(body: GoogleCredential, response: Response):
     user = auth.upsert_user(auth.verify_google(body.credential))
-    response.set_cookie(auth.COOKIE, auth.issue_session(user["google_sub"]), httponly=True,
+    token = auth.issue_session(user["google_sub"])
+    response.set_cookie(auth.COOKIE, token, httponly=True,
                         secure=settings.auth_cookie_secure, samesite="lax", max_age=30 * 24 * 60 * 60)
-    return {"user": {**auth.public_user(user), **billing.subscription_payload(user)}}
+    return {"user": {**auth.public_user(user), **billing.subscription_payload(user)},
+            "access_token": token}
 
 
 @app.get("/auth/me")
 def me(user: dict = Depends(auth.current_user)):
     return {**auth.public_user(user), **billing.subscription_payload(user)}
+
+
+@app.post("/auth/media-token")
+def media_token(body: MediaTokenRequest, user: dict = Depends(auth.current_user)):
+    token, expires_at = auth.issue_media_token(user["google_sub"], body.path)
+    return {"token": token, "expires_at": expires_at}
 
 
 @app.post("/auth/logout", status_code=204)
@@ -87,6 +95,11 @@ def create_billing_portal(user: dict = Depends(auth.current_user)):
     return {"url": billing.portal(user)}
 
 
+@app.post("/billing/change-plan")
+def change_billing_plan(body: CheckoutRequest, user: dict = Depends(auth.current_user)):
+    return {"url": billing.change_plan(user, body.plan)}
+
+
 @app.post("/billing/webhook")
 async def stripe_webhook(request: Request):
     billing.webhook(await request.body(), request.headers.get("stripe-signature"))
@@ -94,6 +107,10 @@ async def stripe_webhook(request: Request):
 
 
 def editor_user(user: dict = Depends(auth.current_user)):
+    return billing.require_editor(user)
+
+
+def editor_media_user(user: dict = Depends(auth.media_user)):
     return billing.require_editor(user)
 
 
@@ -143,7 +160,7 @@ def get_job(job_id: UUID, user: dict = Depends(auth.current_user)):
 
 @app.get("/jobs/{job_id}/clips/{index}")
 def get_clip(job_id: UUID, index: int, download: bool = False,
-             user: dict = Depends(auth.current_user)):
+             user: dict = Depends(auth.media_user)):
     state = get_job(job_id, user)
     if state["status"] != "completed" or index not in {c["index"] for c in state["clips"]}:
         raise HTTPException(404, "Clip not available.")
@@ -199,7 +216,7 @@ async def upload_editor_source(request: Request, user: dict = Depends(editor_use
 
 
 @app.get("/editor/sources/{source_id}")
-def get_editor_source(source_id: UUID, user: dict = Depends(editor_user)):
+def get_editor_source(source_id: UUID, user: dict = Depends(editor_media_user)):
     try:
         path, metadata = editor.read_source(source_id)
         if metadata.get("owner_id") != user["google_sub"]:
@@ -210,7 +227,7 @@ def get_editor_source(source_id: UUID, user: dict = Depends(editor_user)):
 
 
 @app.get("/editor/sources/{source_id}/waveform")
-def get_editor_source_waveform(source_id: UUID, user: dict = Depends(editor_user)):
+def get_editor_source_waveform(source_id: UUID, user: dict = Depends(editor_media_user)):
     try:
         _, metadata = editor.read_source(source_id)
         if metadata.get("owner_id") != user["google_sub"]:
@@ -223,7 +240,7 @@ def get_editor_source_waveform(source_id: UUID, user: dict = Depends(editor_user
 
 
 @app.get("/editor/jobs/{job_id}/source")
-def get_editor_job_source(job_id: UUID, user: dict = Depends(editor_user)):
+def get_editor_job_source(job_id: UUID, user: dict = Depends(editor_media_user)):
     try:
         if jobs.read(str(job_id)).get("owner_id") != user["google_sub"]:
             raise FileNotFoundError
@@ -236,7 +253,7 @@ def get_editor_job_source(job_id: UUID, user: dict = Depends(editor_user)):
 
 
 @app.get("/editor/jobs/{job_id}/waveform")
-def get_editor_job_waveform(job_id: UUID, user: dict = Depends(editor_user)):
+def get_editor_job_waveform(job_id: UUID, user: dict = Depends(editor_media_user)):
     try:
         if jobs.read(str(job_id)).get("owner_id") != user["google_sub"]:
             raise FileNotFoundError
@@ -280,7 +297,7 @@ def get_editor_export(export_id: UUID, user: dict = Depends(editor_user)):
 
 @app.get("/editor/exports/{export_id}/video")
 def get_editor_export_video(export_id: UUID, download: bool = False,
-                            user: dict = Depends(editor_user)):
+                            user: dict = Depends(editor_media_user)):
     state = get_editor_export(export_id, user)
     if state["status"] != "completed":
         raise HTTPException(404, "Export is not ready.")

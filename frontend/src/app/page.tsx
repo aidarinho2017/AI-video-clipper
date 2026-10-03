@@ -3,8 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import LandingPage, { PricingCards, type BillingPlan } from "./LandingPage";
-
-const API = "http://localhost:8000";
+import { apiRequest, clearSession, mediaUrl } from "../lib/api";
 const STORAGE = "clipper-job";
 const stages = [
   ["downloading", "Downloading video"],
@@ -65,29 +64,6 @@ type ModelCatalog = {
   models: ModelOption[];
 };
 
-async function request<T = Job>(path: string, options?: RequestInit): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${API}${path}`, {
-      ...options,
-      credentials: "include",
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    throw new Error(
-      "Cannot reach the backend. Make sure it is running on localhost:8000.",
-    );
-  }
-  const data = response.status === 204 ? undefined : await response.json();
-  if (!response.ok)
-    throw new Error(
-      typeof data.detail === "string"
-        ? data.detail
-        : "Invalid request. Check the YouTube URL and try again.",
-    );
-  return data;
-}
-
 function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onManage, onLogout, onBack }: {
   user: User;
   plans: BillingPlan[];
@@ -138,6 +114,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(0);
   const [restore, setRestore] = useState(0);
+  const [clipUrls, setClipUrls] = useState<Record<number, string>>({});
   const [models, setModels] = useState<ModelOption[]>([]);
   const [model, setModel] = useState("gemini-fast");
   const [instructions, setInstructions] = useState("");
@@ -154,8 +131,8 @@ export default function Home() {
     ? clipLength : user?.entitlements.clip_lengths.at(-1) ?? clipLength) as "short" | "medium" | "long";
 
   useEffect(() => {
-    request<User>("/auth/me").then(setUser).catch(() => setUser(null));
-    request<{ plans: BillingPlan[] }>("/billing/plans").then((data) => setPlans(data.plans)).catch((err) => setError(err.message));
+    apiRequest<User>("/auth/me").then(setUser).catch(() => setUser(null));
+    apiRequest<{ plans: BillingPlan[] }>("/billing/plans").then((data) => setPlans(data.plans)).catch((err) => setError(err.message));
   }, []);
 
   const subscriptionStatus = user?.subscription_status;
@@ -167,7 +144,7 @@ export default function Home() {
     }
     let attempts = 0;
     const timer = setInterval(() => {
-      request<User>("/auth/me").then((next) => {
+      apiRequest<User>("/auth/me").then((next) => {
         setBillingNotice("Payment completed. Waiting for Stripe to activate your subscription…");
         setUser(next);
         if (next.subscription_status === "active") clearInterval(timer);
@@ -181,7 +158,7 @@ export default function Home() {
   }, [subscriptionStatus]);
 
   useEffect(() => {
-    request<ModelCatalog>("/ai/models")
+    apiRequest<ModelCatalog>("/ai/models")
       .then((catalog) => {
         setModels(catalog.models);
         const defaultModel = catalog.models.find(
@@ -201,7 +178,7 @@ export default function Home() {
     const id = localStorage.getItem(STORAGE);
     if (!id) return;
     let active = true;
-    request(`/jobs/${id}`)
+    apiRequest<Job>(`/jobs/${id}`)
       .then((data) => {
         if (active) {
           setJob(data);
@@ -225,7 +202,7 @@ export default function Home() {
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const data = await request(`/jobs/${jobId}`);
+        const data = await apiRequest<Job>(`/jobs/${jobId}`);
         if (active) {
           setJob(data);
           setUser((current) => current && data.credits !== undefined ? { ...current, credits: data.credits } : current);
@@ -252,7 +229,7 @@ export default function Home() {
     setBusy(true);
     setError("");
     try {
-      const data = await request("/jobs", {
+      const data = await apiRequest<Job>("/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -279,10 +256,15 @@ export default function Home() {
     setJob(null);
     setError("");
     setSelected(0);
+    setClipUrls({});
   }
 
   async function logout() {
-    await request("/auth/logout", { method: "POST" });
+    try {
+      await apiRequest("/auth/logout", { method: "POST" });
+    } finally {
+      clearSession();
+    }
     reset();
     setUser(null);
   }
@@ -291,7 +273,7 @@ export default function Home() {
     setBillingBusy(plan);
     setError("");
     try {
-      const result = await request<{ url: string }>("/billing/checkout", {
+      const result = await apiRequest<{ url: string }>("/billing/checkout", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan }),
       });
       window.location.assign(result.url);
@@ -304,13 +286,23 @@ export default function Home() {
   async function manageBilling() {
     setError("");
     try {
-      const result = await request<{ url: string }>("/billing/portal", { method: "POST" });
+      const result = await apiRequest<{ url: string }>("/billing/portal", { method: "POST" });
       window.location.assign(result.url);
     } catch (reason) {
       setError((reason as Error).message);
     }
   }
   const clip = job?.clips[selected];
+
+  useEffect(() => {
+    if (job?.status !== "completed") return;
+    let active = true;
+    Promise.all(job.clips.map(async ({ index }) => [index,
+      await mediaUrl(`/jobs/${job.id}/clips/${index}`)] as const))
+      .then((entries) => { if (active) setClipUrls(Object.fromEntries(entries)); })
+      .catch((reason) => { if (active) setError(reason.message); });
+    return () => { active = false; };
+  }, [job?.id, job?.status, job?.clips]);
 
   if (user === undefined) return <main className="shell"><p>Loading…</p></main>;
 
@@ -330,6 +322,7 @@ export default function Home() {
         {subscribed ? <>
           <span>{user.plan}</span>
           <strong>{user.credits} credits</strong>
+          <Link className="text-button" href="/pricing">Plans</Link>
           <button className="text-button" onClick={manageBilling}>Billing</button>
         </> : <span className="preview-badge">Preview</span>}
         <button className="text-button" onClick={logout}>Sign out</button>
@@ -524,7 +517,7 @@ export default function Home() {
                 controls
                 playsInline
                 preload="metadata"
-                src={`${API}/jobs/${job.id}/clips/${clip.index}`}
+                src={clipUrls[clip.index]}
               />
               <span className="preview-tag">
                 {Math.round(clip.end - clip.start)} SEC · 9:16
@@ -574,7 +567,7 @@ export default function Home() {
               </div>
               <a
                 className="primary download"
-                href={`${API}/jobs/${job.id}/clips/${clip.index}?download=true`}
+                href={clipUrls[clip.index] ? `${clipUrls[clip.index]}&download=true` : undefined}
               >
                 Download clip <span aria-hidden="true">↓</span>
               </a>

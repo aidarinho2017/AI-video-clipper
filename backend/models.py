@@ -41,6 +41,10 @@ class GoogleCredential(BaseModel):
     credential: str = Field(min_length=100, max_length=10000)
 
 
+class MediaTokenRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=500, pattern=r"^/")
+
+
 class CheckoutRequest(BaseModel):
     plan: Literal["starter", "pro", "studio"]
 

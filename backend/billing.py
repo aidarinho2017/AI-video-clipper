@@ -151,6 +151,43 @@ def portal(user: dict) -> str:
         raise HTTPException(502, "Stripe could not open the billing portal. Try again.") from exc
 
 
+def change_plan(user: dict, plan_id: str) -> str:
+    require_active(user)
+    if user.get("plan") == plan_id:
+        raise HTTPException(409, "This is already your current plan.")
+    price = _prices().get(plan_id)
+    if not price:
+        raise HTTPException(503, f"Stripe price for {plan_id} is not configured.")
+    if not user.get("stripe_customer_id") or not user.get("stripe_subscription_id"):
+        raise HTTPException(409, "The Stripe subscription is not linked to this account.")
+    _stripe_key()
+    try:
+        subscription = stripe.Subscription.retrieve(user["stripe_subscription_id"])
+        items = subscription["items"]["data"]
+        if len(items) != 1 or _id(subscription.get("customer")) != user["stripe_customer_id"]:
+            raise HTTPException(409, "This subscription cannot be changed automatically.")
+        session = stripe.billing_portal.Session.create(
+            customer=user["stripe_customer_id"],
+            return_url=f"{settings.app_url}/pricing",
+            flow_data={
+                "type": "subscription_update_confirm",
+                "after_completion": {
+                    "type": "redirect",
+                    "redirect": {"return_url": f"{settings.app_url}/pricing?changed={plan_id}"},
+                },
+                "subscription_update_confirm": {
+                    "subscription": user["stripe_subscription_id"],
+                    "items": [{"id": items[0]["id"], "price": price, "quantity": 1}],
+                },
+            },
+        )
+        return session.url
+    except HTTPException:
+        raise
+    except stripe.StripeError as exc:
+        raise HTTPException(502, "Stripe could not prepare this plan change. Try again.") from exc
+
+
 def _id(value):
     return value.get("id") if hasattr(value, "get") else value
 

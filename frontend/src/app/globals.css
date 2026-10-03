@@ -626,6 +626,18 @@ html {
   font-size: 17px;
   font-weight: 500;
 }
+.current-plan {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 4px 6px;
+  border: 1px solid #668cf44a;
+  border-radius: 5px;
+  color: #8da9f5;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: .13em;
+  vertical-align: 2px;
+}
 .pricing-price {
   display: flex;
   align-items: baseline;
@@ -857,6 +869,7 @@ html {
   font-size: 14px;
 }
 .subscription-page .pricing-grid { margin-top: 30px; }
+.plan-page > section { padding-top: 70px; }
 .billing-notice,
 .billing-error {
   width: fit-content;
@@ -1208,7 +1221,9 @@ form .primary {
   color: #a5b6d8;
   font-size: 13px;
   padding: 8px 0;
+  text-decoration: none;
 }
+.text-button:hover { color: #dce5fa; }
 .error .text-button {
   display: block;
 }

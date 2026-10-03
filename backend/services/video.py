@@ -88,7 +88,7 @@ def _face_center(source: Path, clip: ClipCandidate) -> float:
             ok, frame = capture.read()
             if not ok:
                 continue
-            _, width = frame.shape[:2]
+            height, width = frame.shape[:2]
             scale = min(1, 640 / width)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             if scale < 1:

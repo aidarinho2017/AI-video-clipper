@@ -15,17 +15,19 @@ export type BillingPlan = {
   configured: boolean;
 };
 
-export function PricingCards({ plans, onSelect, busy }: {
+export function PricingCards({ plans, onSelect, busy, currentPlan }: {
   plans: BillingPlan[];
   onSelect?: (plan: BillingPlan["id"]) => void;
   busy?: string;
+  currentPlan?: BillingPlan["id"] | null;
 }) {
+  const currentPrice = plans.find((plan) => plan.id === currentPlan)?.price;
   return (
     <div className="pricing-grid">
       {plans.map((plan) => (
         <article className={`pricing-card ${plan.id === "pro" ? "featured" : ""}`} key={plan.id}>
           {plan.id === "pro" && <span className="pricing-popular">MOST POPULAR</span>}
-          <h3>{plan.name}</h3>
+          <h3>{plan.name} {plan.id === currentPlan && <span className="current-plan">CURRENT</span>}</h3>
           <div className="pricing-price"><strong>${plan.price}</strong><span>/ month</span></div>
           <p>{plan.credits.toLocaleString()} credits every month</p>
           <ul>
@@ -36,8 +38,10 @@ export function PricingCards({ plans, onSelect, busy }: {
           </ul>
           {onSelect ? (
             <button className={plan.id === "pro" ? "primary" : "landing-secondary"}
-                    disabled={Boolean(busy) || !plan.configured} onClick={() => onSelect(plan.id)}>
-              {busy === plan.id ? "Opening Checkout…" : plan.configured ? `Choose ${plan.name}` : "Configure Stripe price"}
+                    disabled={Boolean(busy) || !plan.configured || plan.id === currentPlan} onClick={() => onSelect(plan.id)}>
+              {plan.id === currentPlan ? "Current plan" : busy === plan.id ? "Opening Stripe…"
+                : plan.configured ? `${currentPrice && plan.price > currentPrice ? "Upgrade" : currentPrice ? "Downgrade" : "Choose"} to ${plan.name}`
+                : "Configure Stripe price"}
             </button>
           ) : <Link className={plan.id === "pro" ? "primary" : "landing-secondary"} href="/login">Choose {plan.name}</Link>}
         </article>

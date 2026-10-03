@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Script from "next/script";
 import { useEffect, useState } from "react";
 
-const API = "http://localhost:8000";
+import { apiRequest, saveSession } from "../../lib/api";
 
 declare global {
   interface Window {
@@ -16,22 +16,6 @@ declare global {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${API}${path}`, {
-      ...options,
-      credentials: "include",
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    throw new Error("Cannot reach the backend. Make sure it is running on localhost:8000.");
-  }
-  const data = await response.json();
-  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Sign in failed. Try again.");
-  return data;
-}
-
 export default function LoginPage() {
   const router = useRouter();
   const [clientId, setClientId] = useState("");
@@ -40,10 +24,10 @@ export default function LoginPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    request("/auth/me")
+    apiRequest("/auth/me")
       .then(() => router.replace("/"))
       .catch(() => setChecking(false));
-    request<{ google_client_id: string }>("/auth/config")
+    apiRequest<{ google_client_id: string }>("/auth/config")
       .then((config) => setClientId(config.google_client_id))
       .catch((reason) => {
         setError(reason.message);
@@ -58,11 +42,12 @@ export default function LoginPage() {
       callback: async ({ credential }) => {
         setError("");
         try {
-          await request("/auth/google", {
+          const result = await apiRequest<{ access_token: string }>("/auth/google", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ credential }),
           });
+          saveSession(result.access_token);
           router.replace("/");
         } catch (reason) {
           setError((reason as Error).message);

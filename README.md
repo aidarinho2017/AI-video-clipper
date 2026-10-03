@@ -57,7 +57,7 @@ Install the [Stripe CLI](https://docs.stripe.com/stripe-cli), then forward test 
 stripe listen --forward-to localhost:8000/billing/webhook
 ```
 
-Copy the printed `whsec_...` value to `STRIPE_WEBHOOK_SECRET` and restart the backend. Enable the Stripe Customer Portal with payment-method updates and cancellation; leave plan switching disabled. Use card `4242 4242 4242 4242`, any future expiry, and any CVC in Checkout. No real money moves in test mode.
+Copy the printed `whsec_...` value to `STRIPE_WEBHOOK_SECRET` and restart the backend. Enable the Stripe Customer Portal with payment-method updates, cancellation, and subscription updates between the three configured prices. Use card `4242 4242 4242 4242`, any future expiry, and any CVC in Checkout. No real money moves in test mode.
 
 User accounts, subscriptions, processed Stripe events, and balances are stored in PostgreSQL. New accounts start with zero credits. Each successful monthly invoice resets the balance to 100, 500, or 2,000 credits. A job reserves one credit per requested clip and automatically refunds failed or missing clips.
 
@@ -80,6 +80,8 @@ Virality is an editorial heuristic, not a prediction of views. Audio timestamp e
 Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candidate JSON, atomic status JSON, and generated clips. Editor uploads and exports are stored under the same data directory. This directory is ignored by Git and must be on persistent storage. Finished jobs survive restarts; interrupted jobs are marked failed. Only one job runs at a time. Refreshing the browser restores the current job.
 
 - `GET /health`: backend health.
+- `POST /auth/google`: exchanges a Google credential for the user and a signed session token.
+- `POST /auth/media-token`: creates a four-hour, path-bound URL token for authenticated media playback.
 - `GET /ai/models`: configured Gemini, Anthropic, and OpenAI models.
 - `GET /billing/plans`: plan prices, credits, and entitlements.
 - `POST /billing/checkout`: authenticated Stripe test Checkout session.
@@ -91,7 +93,42 @@ Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candi
 
 Stages reflect completed work, not estimated percentages. Cutting and vertical conversion are one encoding pass. The fallback audio upload is removed from Gemini after transcription where possible; a failed remote cleanup relies on the Files API expiry. Local files remain until you manually remove an individual job directory with the backend stopped. There is no automatic disk cleanup.
 
-Use public videos you have permission to process. YouTube can block automated downloads or require sign-in; this app does not import browser cookies. Keep yt-dlp current if downloads stop working. Node is used by yt-dlp for YouTube's JavaScript challenges. Sources must be at least 75 seconds and within the configured duration limit. The app binds to localhost and is not intended for public exposure.
+Use public videos you have permission to process. YouTube can block automated downloads or require sign-in; this app does not import browser cookies. Keep yt-dlp current if downloads stop working. Node is used by yt-dlp for YouTube's JavaScript challenges. Sources must be at least 75 seconds and within the configured duration limit.
+
+## Deploy with Railway, Netlify, and Supabase
+
+Production runs as one Railway backend replica, one Netlify site, and one Supabase PostgreSQL database. Do not run `start.py` in production and do not add Uvicorn workers: jobs and the processing lock live in the backend process.
+
+1. Create a Supabase project. In **Connect**, copy the **Session pooler** URL on port `5432`, replace the password, and append `?sslmode=require` (or `&sslmode=require` if it already has query parameters). No SQL migration is required for a clean database; the backend creates its tables at startup.
+2. Import this repository into Netlify. The root `netlify.toml` builds the `frontend` directory. Reserve the generated `https://YOUR-SITE.netlify.app` URL.
+3. Import the same repository into Railway. Set `RAILWAY_DOCKERFILE_PATH=backend/Dockerfile`, generate a public domain, keep one replica, and set `/health` as the healthcheck path.
+4. Attach a Railway volume at `/data`. Start with enough space for source videos and exports (20 GB is practical); there is no automatic cleanup.
+5. Add these Railway variables:
+
+```text
+APP_URL=https://YOUR-SITE.netlify.app
+DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?sslmode=require
+DATA_DIR=/data
+AUTH_SECRET=at-least-32-random-characters
+AUTH_COOKIE_SECURE=true
+GOOGLE_CLIENT_ID=...
+GEMINI_API_KEY=...
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_STARTER=price_...
+STRIPE_PRICE_PRO=price_...
+STRIPE_PRICE_STUDIO=price_...
+```
+
+Only one AI provider key is required, but Gemini is also the captionless-video transcription fallback. Generate `AUTH_SECRET` with `openssl rand -hex 32`. Keep every secret in Railway, never Netlify.
+
+6. In Netlify, set `NEXT_PUBLIC_API_URL=https://YOUR-BACKEND.up.railway.app` and redeploy. This value is compiled into the browser bundle, so changing it always requires a new frontend build.
+7. In Google Cloud, add the exact Netlify URL to the Web client’s **Authorized JavaScript origins**.
+8. In the Stripe **test-mode** Dashboard, add `https://YOUR-BACKEND.up.railway.app/billing/webhook` and subscribe to `checkout.session.completed`, `checkout.session.expired`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, and `customer.subscription.deleted`. Put that endpoint’s signing secret in Railway and redeploy.
+
+Verify `/health`, Google login, test checkout, webhook activation, one short clip generation, clip download, editor upload/export, and plan switching. Restart the Railway service once and confirm completed files still load from the volume. Railway deployments with a mounted volume can have brief downtime; interrupted jobs are marked failed and their reserved credits are refunded on restart.
 
 ## Checks
 

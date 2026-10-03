@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from contextlib import contextmanager
 
@@ -15,6 +16,10 @@ from .config import settings
 
 COOKIE = "clipper_session"
 pool: ConnectionPool | None = None
+MEDIA_PATH = re.compile(
+    r"^/(?:jobs/[0-9a-f-]+/clips/\d+|editor/(?:sources/[0-9a-f-]+(?:/waveform)?|"
+    r"jobs/[0-9a-f-]+/(?:source|waveform)|exports/[0-9a-f-]+/video))$"
+)
 
 
 @contextmanager
@@ -97,16 +102,27 @@ def _secret() -> bytes:
     return secret.encode()
 
 
-def issue_session(google_sub: str) -> str:
+def _issue(google_sub: str, expires_in: int, **claims) -> tuple[str, int]:
+    expires_at = int(time.time()) + expires_in
     payload = base64.urlsafe_b64encode(json.dumps({
-        "sub": google_sub, "exp": int(time.time()) + 30 * 24 * 60 * 60,
+        "sub": google_sub, "exp": expires_at, **claims,
     }, separators=(",", ":")).encode()).rstrip(b"=")
     signature = hmac.new(_secret(), payload, hashlib.sha256).digest()
-    return f"{payload.decode()}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+    token = f"{payload.decode()}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+    return token, expires_at
 
 
-def current_user(request: Request) -> dict:
-    token = request.cookies.get(COOKIE, "")
+def issue_session(google_sub: str) -> str:
+    return _issue(google_sub, 30 * 24 * 60 * 60, scope="session")[0]
+
+
+def issue_media_token(google_sub: str, path: str) -> tuple[str, int]:
+    if not MEDIA_PATH.fullmatch(path):
+        raise HTTPException(422, "This path cannot receive a media token.")
+    return _issue(google_sub, 4 * 60 * 60, scope="media", path=path)
+
+
+def _decode(token: str) -> dict:
     try:
         payload, signature = token.split(".")
         expected = hmac.new(_secret(), payload.encode(), hashlib.sha256).digest()
@@ -116,13 +132,36 @@ def current_user(request: Request) -> dict:
         data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         if data["exp"] < time.time():
             raise ValueError
-        with _connect() as db:
-            user = db.execute("SELECT * FROM users WHERE google_sub = %s", (data["sub"],)).fetchone()
-        if not user:
-            raise ValueError
-        return user
-    except (ValueError, KeyError, json.JSONDecodeError):
+        return data
+    except (ValueError, KeyError, json.JSONDecodeError, TypeError):
         raise HTTPException(401, "Sign in with Google to continue.") from None
+
+
+def _user(data: dict) -> dict:
+    with _connect() as db:
+        user = db.execute("SELECT * FROM users WHERE google_sub = %s", (data["sub"],)).fetchone()
+    if not user:
+        raise HTTPException(401, "Sign in with Google to continue.")
+    return user
+
+
+def current_user(request: Request) -> dict:
+    authorization = request.headers.get("authorization", "")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else request.cookies.get(COOKIE, "")
+    data = _decode(token)
+    if data.get("scope", "session") != "session":
+        raise HTTPException(401, "Sign in with Google to continue.")
+    return _user(data)
+
+
+def media_user(request: Request) -> dict:
+    token = request.query_params.get("media_token")
+    if not token:
+        return current_user(request)
+    data = _decode(token)
+    if data.get("scope") != "media" or data.get("path") != request.url.path:
+        raise HTTPException(401, "This media link is invalid or expired.")
+    return _user(data)
 
 
 def charge(google_sub: str, amount: int) -> int:

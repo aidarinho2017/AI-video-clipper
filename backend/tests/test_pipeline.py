@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
@@ -45,6 +46,7 @@ class PipelineTests(unittest.TestCase):
         with patch("backend.auth.verify_google", return_value=claims):
             response = client.post("/auth/google", json={"credential": "x" * 100})
         self.assertEqual(response.status_code, 200)
+        self.last_access_token = response.json()["access_token"]
         if subscribed:
             with auth._connect() as db:
                 db.execute("""UPDATE users SET plan='studio', subscription_status='active', credits=2000
@@ -107,12 +109,16 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(client.get("/health").json(), {"status": "ok"})
                 self.assertEqual(client.get("/auth/me").status_code, 401)
                 self.assertEqual(self.login(client)["credits"], 2000)
+                client.cookies.clear()
+                client.headers["Authorization"] = f"Bearer {self.last_access_token}"
+                self.assertEqual(client.get("/auth/me").status_code, 200)
                 catalog = client.get("/ai/models").json()
                 self.assertEqual(catalog["default_model"], "gemini-fast")
                 self.assertEqual(len(catalog["models"]), 6)
                 self.assertTrue(catalog["models"][0]["configured"])
-                cors = client.options("/jobs", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"})
+                cors = client.options("/jobs", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type"})
                 self.assertEqual(cors.headers["access-control-allow-origin"], "http://localhost:3000")
+                self.assertIn("Authorization", cors.headers["access-control-allow-headers"])
                 self.assertEqual(client.post("/jobs", json={"youtube_url": "https://evil.test"}).status_code, 422)
                 with patch.object(settings, "gemini_api_key", SecretStr("")):
                     self.assertEqual(client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ"}).status_code, 503)
@@ -136,6 +142,15 @@ class PipelineTests(unittest.TestCase):
                 response = client.get(f"/jobs/{job_id}/clips/1", headers={"Range": "bytes=0-3"})
                 self.assertEqual(response.status_code, 206)
                 self.assertEqual(response.content, b"0123")
+                path = f"/jobs/{job_id}/clips/1"
+                media = client.post("/auth/media-token", json={"path": path}).json()["token"]
+                client.headers.pop("Authorization")
+                self.assertEqual(client.get(f"{path}?media_token={media}").status_code, 200)
+                self.assertEqual(client.get(
+                    f"/jobs/{job_id}/clips/2?media_token={media}").status_code, 401)
+                client.headers["Authorization"] = f"Bearer {self.last_access_token}"
+                self.assertEqual(client.post(
+                    "/auth/media-token", json={"path": "/billing/plans"}).status_code, 422)
                 self.assertIn("attachment", client.get(f"/jobs/{job_id}/clips/1?download=true").headers["content-disposition"])
                 self.assertEqual(client.get(f"/jobs/{job_id}/clips/6").status_code, 404)
                 self.assertEqual(client.get("/jobs/00000000-0000-0000-0000-000000000000").status_code, 404)
@@ -160,6 +175,8 @@ class PipelineTests(unittest.TestCase):
                 settings, "stripe_secret_key", SecretStr("sk_test_fake")), patch.object(
                 settings, "stripe_webhook_secret", SecretStr("whsec_fake")), patch.object(
                 settings, "stripe_price_starter", "price_starter"), patch.object(
+                settings, "stripe_price_pro", "price_pro"), patch.object(
+                settings, "stripe_price_studio", "price_studio"), patch.object(
                 settings, "database_url", SecretStr(TEST_DATABASE_URL)), TestClient(app) as client:
             user = self.login(client, subscribed=False)
             self.assertEqual((user["credits"], user["subscription_status"]), (0, "inactive"))
@@ -182,6 +199,16 @@ class PipelineTests(unittest.TestCase):
             user = client.get("/auth/me").json()
             self.assertEqual((user["plan"], user["credits"], user["subscription_status"]),
                              ("starter", 100, "active"))
+            self.assertEqual(client.post("/billing/change-plan", json={"plan": "starter"}).status_code, 409)
+            portal_session = SimpleNamespace(url="https://billing.test/change-plan")
+            with patch("backend.billing.stripe.Subscription.retrieve", return_value={
+                    "customer": "cus_test", "items": {"data": [{"id": "si_test"}]} }), patch(
+                    "backend.billing.stripe.billing_portal.Session.create", return_value=portal_session) as create_portal:
+                change = client.post("/billing/change-plan", json={"plan": "pro"})
+            self.assertEqual(change.json()["url"], portal_session.url)
+            flow = create_portal.call_args.kwargs["flow_data"]
+            self.assertEqual(flow["subscription_update_confirm"]["items"], [
+                {"id": "si_test", "price": "price_pro", "quantity": 1}])
             self.assertEqual(client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ",
                                                         "clip_count": 5}).status_code, 403)
             self.assertEqual(client.post("/editor/sources", content=b"video").status_code, 403)
@@ -309,6 +336,14 @@ class PipelineTests(unittest.TestCase):
                 video.cv2, "CascadeClassifier", return_value=detector):
             self.assertEqual(video._face_center(Path("missing.mp4"), clip), 0.5)
             capture.release.assert_called_once()
+        capture = MagicMock()
+        capture.read.return_value = (True, np.zeros((360, 1280, 3), dtype=np.uint8))
+        detector = MagicMock()
+        detector.empty.return_value = False
+        detector.detectMultiScale.return_value = []
+        with patch.object(video.cv2, "VideoCapture", return_value=capture), patch.object(
+                video.cv2, "CascadeClassifier", return_value=detector):
+            self.assertEqual(video._face_center(Path("wide.mp4"), clip), 0.5)
 
     def test_provider_response_shapes(self):
         self.assertEqual(analysis._parse('```json\n{"candidates": []}\n```'), {"candidates": []})
