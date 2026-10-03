@@ -101,7 +101,7 @@ Production runs as one Railway backend replica, one Netlify site, and one Supaba
 
 1. Create a Supabase project. In **Connect**, copy the **Session pooler** URL on port `5432`, replace the password, and append `?sslmode=require` (or `&sslmode=require` if it already has query parameters). No SQL migration is required for a clean database; the backend creates its tables at startup.
 2. Import this repository into Netlify. The root `netlify.toml` builds the `frontend` directory. Reserve the generated `https://YOUR-SITE.netlify.app` URL.
-3. Import the same repository into Railway. Set `RAILWAY_DOCKERFILE_PATH=backend/Dockerfile`, generate a public domain, keep one replica, and set `/health` as the healthcheck path.
+3. Import the same repository into Railway. Railway automatically detects the root `Dockerfile`; leave Root Directory, Dockerfile Path, and Custom Start Command empty. Generate a public domain, keep one replica, and set `/health` as the healthcheck path.
 4. Attach a Railway volume at `/data`. Start with enough space for source videos and exports (20 GB is practical); there is no automatic cleanup.
 5. Add these Railway variables:
 
@@ -124,7 +124,7 @@ STRIPE_PRICE_STUDIO=price_...
 
 Only one AI provider key is required, but Gemini is also the captionless-video transcription fallback. Generate `AUTH_SECRET` with `openssl rand -hex 32`. Keep every secret in Railway, never Netlify.
 
-6. In Netlify, set `NEXT_PUBLIC_API_URL=https://YOUR-BACKEND.up.railway.app` and redeploy. This value is compiled into the browser bundle, so changing it always requires a new frontend build.
+6. In Netlify, select the Next.js runtime and set Base directory to `frontend`, Package directory empty, Build command to `npm run build`, Publish directory to `.next`, and Functions directory empty. Set `NEXT_PUBLIC_API_URL=https://YOUR-BACKEND.up.railway.app`, then clear the build cache and redeploy. This value is compiled into the browser bundle, so changing it always requires a new frontend build.
 7. In Google Cloud, add the exact Netlify URL to the Web client’s **Authorized JavaScript origins**.
 8. In the Stripe **test-mode** Dashboard, add `https://YOUR-BACKEND.up.railway.app/billing/webhook` and subscribe to `checkout.session.completed`, `checkout.session.expired`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, and `customer.subscription.deleted`. Put that endpoint’s signing secret in Railway and redeploy.
 
