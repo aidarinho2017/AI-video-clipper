@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 const GITHUB = "https://github.com/aidarinho2017/AI-video-clipper";
@@ -38,7 +39,7 @@ export function PricingCards({ plans, onSelect, busy }: {
                     disabled={Boolean(busy) || !plan.configured} onClick={() => onSelect(plan.id)}>
               {busy === plan.id ? "Opening Checkout…" : plan.configured ? `Choose ${plan.name}` : "Configure Stripe price"}
             </button>
-          ) : <a className={plan.id === "pro" ? "primary" : "landing-secondary"} href="#start">Choose {plan.name}</a>}
+          ) : <Link className={plan.id === "pro" ? "primary" : "landing-secondary"} href="/login">Choose {plan.name}</Link>}
         </article>
       ))}
     </div>
@@ -80,8 +81,7 @@ function Step({ number, title, children }: {
   );
 }
 
-export default function LandingPage({ signIn, error, plans }: {
-  signIn: ReactNode;
+export default function LandingPage({ error, plans }: {
   error?: string;
   plans: BillingPlan[];
 }) {
@@ -94,8 +94,8 @@ export default function LandingPage({ signIn, error, plans }: {
         <div>
           <a href="#editor">Editor</a>
           <a href={GITHUB} target="_blank" rel="noreferrer">GitHub</a>
-          <a href="#start">Sign in</a>
-          <a className="landing-nav-cta" href="#start">Try Clipper</a>
+          <Link href="/login">Sign in</Link>
+          <Link className="landing-nav-cta" href="/login">Try Clipper</Link>
         </div>
       </nav>
 
@@ -104,7 +104,7 @@ export default function LandingPage({ signIn, error, plans }: {
         <h1>Turn long videos into<br /><span>short clips people watch.</span></h1>
         <p>AI finds the strongest moments, reframes the speaker, and renders vertical clips with captions — ready for Shorts, Reels, and TikTok.</p>
         <div className="landing-actions">
-          <a className="primary" href="#start">Create clips <span aria-hidden="true">↗</span></a>
+          <Link className="primary" href="/login">Create clips <span aria-hidden="true">↗</span></Link>
           <a className="landing-secondary" href="#how">See how it works</a>
         </div>
         <small>No editing skills required. Plans start at $9/month.</small>
@@ -160,7 +160,7 @@ export default function LandingPage({ signIn, error, plans }: {
           <span className="demo-label">BUILT-IN VIDEO EDITOR</span>
           <h2>Finish the cut<br />without leaving Clipper.</h2>
           <p>Import local video and audio, trim and split clips, add captions and crossfades, adjust framing, then export a single MP4.</p>
-          <a href="#start">Open after sign in <span aria-hidden="true">→</span></a>
+          <Link href="/login">Open after sign in <span aria-hidden="true">→</span></Link>
         </div>
         <div className="editor-mini" aria-hidden="true">
           <div className="editor-mini-head"><i /><span>Preview</span><b>Export</b></div>
@@ -183,8 +183,8 @@ export default function LandingPage({ signIn, error, plans }: {
       <section className="landing-final reveal" id="start">
         <span className="demo-label">START CLIPPING</span>
         <h2>Your best clips are already<br />inside your videos.</h2>
-        <p>Sign in with Google, choose a plan, and create your first clips.</p>
-        {signIn}
+        <p>Try the workspace, shape your first clip, and choose a plan when you are ready to generate.</p>
+        <Link className="primary landing-final-cta" href="/login">Try Clipper <span aria-hidden="true">↗</span></Link>
         {error && <p className="landing-error" role="alert">{error}</p>}
       </section>
 

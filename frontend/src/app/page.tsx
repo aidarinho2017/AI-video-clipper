@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Script from "next/script";
 import Link from "next/link";
 import LandingPage, { PricingCards, type BillingPlan } from "./LandingPage";
 
@@ -89,39 +88,7 @@ async function request<T = Job>(path: string, options?: RequestInit): Promise<T>
   return data;
 }
 
-function GoogleSignIn({ clientId, onLogin, onError }: {
-  clientId: string;
-  onLogin: (user: User) => void;
-  onError: (message: string) => void;
-}) {
-  const [ready, setReady] = useState(false);
-  const button = (element: HTMLDivElement | null) => {
-    if (!element || !ready || !window.google) return;
-    window.google.accounts.id.initialize({
-      client_id: clientId,
-      callback: async ({ credential }) => {
-        try {
-          const result = await request<{ user: User }>("/auth/google", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ credential }),
-          });
-          onLogin(result.user);
-        } catch (error) {
-          onError((error as Error).message);
-        }
-      },
-    });
-    element.replaceChildren();
-    window.google.accounts.id.renderButton(element, { theme: "filled_black", size: "large" });
-  };
-  return <>
-    <Script src="https://accounts.google.com/gsi/client" onReady={() => setReady(true)} />
-    <div className="google-button" ref={button} />
-  </>;
-}
-
-function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onManage, onLogout }: {
+function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onManage, onLogout, onBack }: {
   user: User;
   plans: BillingPlan[];
   busy: string;
@@ -130,22 +97,28 @@ function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onMana
   onCheckout: (plan: BillingPlan["id"]) => void;
   onManage: () => void;
   onLogout: () => void;
+  onBack?: () => void;
 }) {
+  const paymentProblem = ["past_due", "unpaid"].includes(user.subscription_status);
   return (
     <main className="subscription-page">
       <header>
         <Link className="landing-logo" href="/"><span aria-hidden="true">C</span> Clipper</Link>
-        <div><span>{user.email}</span><button className="text-button" onClick={onLogout}>Sign out</button></div>
+        <div>
+          {onBack && <button className="text-button" onClick={onBack}>← Back to project</button>}
+          <span>{user.email}</span>
+          <button className="text-button" onClick={onLogout}>Sign out</button>
+        </div>
       </header>
       <section>
         <span className="demo-label">CHOOSE YOUR PLAN</span>
-        <h1>{user.subscription_status === "past_due" ? "Your payment needs attention." : "Start creating with Clipper."}</h1>
-        <p>{user.subscription_status === "past_due"
+        <h1>{paymentProblem ? "Your payment needs attention." : "Your clips are ready to begin."}</h1>
+        <p>{paymentProblem
           ? "Update your payment method in Stripe to restore access."
-          : "Every plan includes monthly credits for AI-generated clips."}</p>
+          : "Choose the plan that fits the clip settings you just prepared."}</p>
         {notice && <div className="billing-notice">{notice}</div>}
         {error && <div className="billing-error" role="alert">{error}</div>}
-        {user.subscription_status === "past_due"
+        {paymentProblem
           ? <button className="primary billing-manage" onClick={onManage}>Manage billing ↗</button>
           : <PricingCards plans={plans} onSelect={onCheckout} busy={busy} />}
       </section>
@@ -153,20 +126,10 @@ function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onMana
   );
 }
 
-declare global {
-  interface Window {
-    google?: { accounts: { id: {
-      initialize(config: { client_id: string; callback(response: { credential: string }): void }): void;
-      renderButton(element: HTMLElement, options: { theme: string; size: string }): void;
-      disableAutoSelect(): void;
-    } } };
-  }
-}
-
 export default function Home() {
   const [user, setUser] = useState<User | null>();
-  const [googleClientId, setGoogleClientId] = useState("");
   const [plans, setPlans] = useState<BillingPlan[]>([]);
+  const [showPricing, setShowPricing] = useState(false);
   const [billingBusy, setBillingBusy] = useState("");
   const [billingNotice, setBillingNotice] = useState("");
   const [url, setUrl] = useState("");
@@ -182,17 +145,15 @@ export default function Home() {
     "short",
   );
   const [clipCount, setClipCount] = useState<1 | 3 | 5 | 10>(5);
-  const allowedModels = models.filter((item) => item.configured && user?.entitlements.model_tiers.includes(item.tier));
+  const subscribed = user?.subscription_status === "active";
+  const allowedModels = models.filter((item) => item.configured && (!subscribed || user.entitlements.model_tiers.includes(item.tier)));
   const activeModel = allowedModels.some((item) => item.id === model) ? model : (allowedModels[0]?.id ?? model);
-  const activeClipCount = (user?.entitlements.clip_counts.includes(clipCount)
+  const activeClipCount = (!subscribed || user.entitlements.clip_counts.includes(clipCount)
     ? clipCount : user?.entitlements.clip_counts.at(-1) ?? clipCount) as 1 | 3 | 5 | 10;
-  const activeClipLength = (user?.entitlements.clip_lengths.includes(clipLength)
+  const activeClipLength = (!subscribed || user.entitlements.clip_lengths.includes(clipLength)
     ? clipLength : user?.entitlements.clip_lengths.at(-1) ?? clipLength) as "short" | "medium" | "long";
 
   useEffect(() => {
-    request<{ google_client_id: string }>("/auth/config")
-      .then((config) => setGoogleClientId(config.google_client_id))
-      .catch((err) => setError(err.message));
     request<User>("/auth/me").then(setUser).catch(() => setUser(null));
     request<{ plans: BillingPlan[] }>("/billing/plans").then((data) => setPlans(data.plans)).catch((err) => setError(err.message));
   }, []);
@@ -284,6 +245,10 @@ export default function Home() {
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
+    if (!subscribed) {
+      setShowPricing(true);
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -318,7 +283,6 @@ export default function Home() {
 
   async function logout() {
     await request("/auth/logout", { method: "POST" });
-    window.google?.accounts.id.disableAutoSelect();
     reset();
     setUser(null);
   }
@@ -350,22 +314,24 @@ export default function Home() {
 
   if (user === undefined) return <main className="shell"><p>Loading…</p></main>;
 
-  if (!user) return <LandingPage error={error} plans={plans} signIn={googleClientId
-    ? <GoogleSignIn clientId={googleClientId} onLogin={setUser} onError={setError} />
-    : <p className="landing-error">Add GOOGLE_CLIENT_ID to backend/.env.</p>} />;
+  if (!user) return <LandingPage error={error} plans={plans} />;
 
-  if (user.subscription_status !== "active") return <SubscriptionGate user={user} plans={plans}
+  const needsBillingRecovery = !["active", "inactive", "canceled"].includes(user.subscription_status);
+  if (showPricing || needsBillingRecovery) return <SubscriptionGate user={user} plans={plans}
     busy={billingBusy} notice={billingNotice} error={error} onCheckout={checkout}
-    onManage={manageBilling} onLogout={logout} />;
+    onManage={manageBilling} onLogout={logout}
+    onBack={needsBillingRecovery ? undefined : () => setShowPricing(false)} />;
 
   return (
     <main className={job?.status === "completed" ? "results-shell" : "shell"}>
       <div className="ambient" aria-hidden="true" />
       <div className="account-bar">
         <span>{user.name}</span>
-        <span>{user.plan}</span>
-        <strong>{user.credits} credits</strong>
-        <button className="text-button" onClick={manageBilling}>Billing</button>
+        {subscribed ? <>
+          <span>{user.plan}</span>
+          <strong>{user.credits} credits</strong>
+          <button className="text-button" onClick={manageBilling}>Billing</button>
+        </> : <span className="preview-badge">Preview</span>}
         <button className="text-button" onClick={logout}>Sign out</button>
       </div>
       {error && (
@@ -421,7 +387,7 @@ export default function Home() {
                 onChange={(event) => setModel(event.target.value)}
               >
                 {models.map((item) => (
-                  <option key={item.id} value={item.id} disabled={!item.configured || !user.entitlements.model_tiers.includes(item.tier)}>
+                  <option key={item.id} value={item.id} disabled={!item.configured || (subscribed && !user.entitlements.model_tiers.includes(item.tier))}>
                     {item.label} · {item.tier}
                     {item.configured ? "" : ` · add ${item.provider.toUpperCase()}_API_KEY`}
                   </option>
@@ -449,9 +415,9 @@ export default function Home() {
                       )
                     }
                   >
-                    <option value="short" disabled={!user.entitlements.clip_lengths.includes("short")}>Short · 15–30 sec</option>
-                    <option value="medium" disabled={!user.entitlements.clip_lengths.includes("medium")}>Medium · 30–60 sec</option>
-                    <option value="long" disabled={!user.entitlements.clip_lengths.includes("long")}>Long · 60–90 sec</option>
+                    <option value="short" disabled={subscribed && !user.entitlements.clip_lengths.includes("short")}>Short · 15–30 sec</option>
+                    <option value="medium" disabled={subscribed && !user.entitlements.clip_lengths.includes("medium")}>Medium · 30–60 sec</option>
+                    <option value="long" disabled={subscribed && !user.entitlements.clip_lengths.includes("long")}>Long · 60–90 sec</option>
                   </select>
                 </div>
                 <div>
@@ -464,7 +430,7 @@ export default function Home() {
                     }
                   >
                     {[1, 3, 5, 10].map((count) => (
-                      <option key={count} value={count} disabled={!user.entitlements.clip_counts.includes(count)}>
+                      <option key={count} value={count} disabled={subscribed && !user.entitlements.clip_counts.includes(count)}>
                         {count}
                       </option>
                     ))}
@@ -474,9 +440,11 @@ export default function Home() {
             </fieldset>
             <button
               className="primary"
-              disabled={busy || user.credits < activeClipCount || !allowedModels.length}
+              disabled={busy || !allowedModels.length || (subscribed && user.credits < activeClipCount)}
             >
-              {busy ? "Starting…" : `Generate Clips · ${activeClipCount} credit${activeClipCount === 1 ? "" : "s"}`}
+              {busy ? "Starting…" : subscribed
+                ? `Generate Clips · ${activeClipCount} credit${activeClipCount === 1 ? "" : "s"}`
+                : "Generate Clips"}
               <span aria-hidden="true">↗</span>
             </button>
             {user.entitlements.editor && <a className="secondary editor-entry" href="/editor">Open video editor</a>}
