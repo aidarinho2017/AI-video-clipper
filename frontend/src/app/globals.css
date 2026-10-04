@@ -682,6 +682,33 @@ html {
   border-radius: 9px;
   font-size: 12px;
 }
+.promo-redeem {
+  width: min(470px, 100%);
+  margin: 32px auto 0;
+  text-align: left;
+}
+.promo-redeem label {
+  display: block;
+  margin-bottom: 9px;
+  color: #9aa5b7;
+  font-size: 12px;
+}
+.promo-redeem > div { display: flex; gap: 9px; }
+.promo-redeem input,
+.admin-page input,
+.admin-page select {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid #ffffff18;
+  border-radius: 8px;
+  outline: none;
+  background: #0d1118;
+  color: #f4f5fb;
+}
+.promo-redeem input { flex: 1; min-width: 0; }
+.promo-redeem button { min-width: 120px; justify-content: center; }
+.promo-signin { margin-top: 25px !important; }
+.promo-signin a { color: #9eb6f8; }
 .login-page {
   min-height: 100svh;
   padding: 0 24px 48px;
@@ -888,6 +915,58 @@ html {
   color: #ffc1bc;
 }
 .billing-manage { margin: 10px auto; }
+
+/* Admin */
+.admin-page {
+  min-height: 100svh;
+  padding: 0 24px 80px;
+  background: radial-gradient(ellipse 65% 38% at 50% 0%, #173a7a24, transparent 72%), #07090e;
+}
+.admin-page > header {
+  width: min(1240px, 100%);
+  height: 76px;
+  margin: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #ffffff0d;
+}
+.admin-heading,
+.admin-section { width: min(1240px, 100%); margin: auto; }
+.admin-heading { padding: 68px 0 45px; }
+.admin-heading h1 { margin: 14px 0 12px; font-size: clamp(38px, 5vw, 62px); font-weight: 500; letter-spacing: -.05em; }
+.admin-heading > p { color: #7b8597; font-size: 13px; }
+.admin-heading .billing-notice,
+.admin-heading .billing-error { margin: 22px 0 0; }
+.admin-section { margin-bottom: 54px; }
+.admin-section h2 { margin: 0 0 18px; font-size: 20px; font-weight: 500; }
+.admin-table-wrap { overflow-x: auto; border: 1px solid #ffffff12; border-radius: 13px; }
+.admin-table { width: 100%; border-collapse: collapse; background: #0d1118; font-size: 12px; }
+.admin-table th { padding: 13px 15px; color: #657084; font-size: 10px; text-align: left; text-transform: uppercase; letter-spacing: .08em; }
+.admin-table td { padding: 15px; border-top: 1px solid #ffffff0d; color: #aab3c3; vertical-align: middle; }
+.admin-table td > strong,
+.admin-table td > span,
+.admin-table td > small { display: block; }
+.admin-table td > strong { margin-bottom: 4px; color: #edf0f6; text-transform: capitalize; }
+.admin-table td > small { margin-top: 4px; color: #667184; }
+.admin-grant { display: flex; align-items: center; gap: 7px; min-width: 390px; }
+.admin-grant input { width: 75px; }
+.admin-grant button:not(.text-button) {
+  min-height: 39px; padding: 0 13px; border: 0; border-radius: 8px; background: #e9edfa; color: #090b10; cursor: pointer;
+}
+.admin-promos { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(320px, 1.2fr); gap: 45px; }
+.admin-promo-form { display: grid; gap: 13px; padding: 22px; border: 1px solid #ffffff12; border-radius: 13px; background: #0d1118; }
+.admin-promo-form label { display: grid; gap: 7px; color: #8994a7; font-size: 11px; }
+.admin-promo-form button { justify-content: center; margin-top: 5px; }
+.admin-code-list { display: grid; gap: 10px; }
+.admin-code-list article { position: relative; padding: 18px; border: 1px solid #ffffff12; border-radius: 11px; background: #0d1118; }
+.admin-code-list article > div { display: flex; align-items: center; gap: 10px; }
+.admin-code-list article > div span { padding: 3px 6px; border-radius: 5px; font-size: 8px; text-transform: uppercase; letter-spacing: .08em; }
+.admin-code-list .active { background: #244f384d; color: #8dd9aa; }
+.admin-code-list .disabled { background: #512b304d; color: #e3a0a6; }
+.admin-code-list p { margin: 10px 0 5px; color: #aab3c3; font-size: 12px; text-transform: capitalize; }
+.admin-code-list small { color: #667184; }
+.admin-code-list article > button { position: absolute; top: 14px; right: 15px; }
 .landing-final h2 { font-size: clamp(43px, 6vw, 70px); }
 .landing-final > p { margin: 23px 0 28px; }
 .landing-final-cta {
@@ -2004,6 +2083,10 @@ button.audio-clip { padding: 0; }
   .subscription-page { padding: 0 15px 50px; }
   .subscription-page > header > div > span { display: none; }
   .subscription-page > section { padding-top: 55px; }
+  .promo-redeem > div { flex-direction: column; }
+  .admin-page { padding: 0 15px 50px; }
+  .admin-heading { padding-top: 48px; }
+  .admin-promos { grid-template-columns: 1fr; }
   .landing-footer { width: calc(100% - 30px); grid-template-columns: 1fr auto; }
   .landing-footer > div { display: none; }
   .setting-grid {

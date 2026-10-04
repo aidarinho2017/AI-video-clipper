@@ -40,13 +40,27 @@ def catalog() -> list[dict]:
     return [{**plan, "id": key, "configured": bool(prices[key])} for key, plan in PLANS.items()]
 
 
+def effective_subscription(user: dict, now: int | None = None) -> dict:
+    now = int(time.time()) if now is None else now
+    if user.get("grant_plan") in PLANS and (user.get("grant_until") or 0) > now:
+        source = "promo" if (user.get("grant_source") or "").startswith("promo:") else "admin"
+        return {"plan": user["grant_plan"], "status": "active", "source": source,
+                "current_period_end": user["grant_until"], "cancel_at_period_end": False}
+    return {"plan": user.get("plan"), "status": user.get("subscription_status", "inactive"),
+            "source": "stripe" if user.get("plan") else None,
+            "current_period_end": user.get("current_period_end"),
+            "cancel_at_period_end": bool(user.get("cancel_at_period_end"))}
+
+
 def subscription_payload(user: dict) -> dict:
-    plan = PLANS.get(user.get("plan"))
+    subscription = effective_subscription(user)
+    plan = PLANS.get(subscription["plan"])
     return {
-        "plan": user.get("plan"),
-        "subscription_status": user.get("subscription_status", "inactive"),
-        "cancel_at_period_end": bool(user.get("cancel_at_period_end")),
-        "current_period_end": user.get("current_period_end"),
+        "plan": subscription["plan"],
+        "subscription_status": subscription["status"],
+        "subscription_source": subscription["source"],
+        "cancel_at_period_end": subscription["cancel_at_period_end"],
+        "current_period_end": subscription["current_period_end"],
         "entitlements": {
             "model_tiers": plan["model_tiers"] if plan else [],
             "clip_counts": plan["clip_counts"] if plan else [],
@@ -64,7 +78,8 @@ def _stripe_key():
 
 
 def _active(user: dict) -> bool:
-    return user.get("subscription_status") == "active" and user.get("plan") in PLANS
+    subscription = effective_subscription(user)
+    return subscription["status"] == "active" and subscription["plan"] in PLANS
 
 
 def require_active(user: dict):
@@ -74,14 +89,14 @@ def require_active(user: dict):
 
 def require_editor(user: dict) -> dict:
     require_active(user)
-    if not PLANS[user["plan"]]["editor"]:
+    if not PLANS[effective_subscription(user)["plan"]]["editor"]:
         raise HTTPException(403, "Upgrade to Pro or Studio to use the video editor.")
     return user
 
 
 def ensure_job(user: dict, model_tier: str, clip_count: int, clip_length: str):
     require_active(user)
-    plan = PLANS[user["plan"]]
+    plan = PLANS[effective_subscription(user)["plan"]]
     if model_tier not in plan["model_tiers"]:
         raise HTTPException(403, "Upgrade your plan to use this AI model.")
     if clip_count not in plan["clip_counts"]:
@@ -275,3 +290,100 @@ def webhook(payload: bytes, signature: str | None):
     except Exception as exc:
         raise HTTPException(400, "Invalid Stripe webhook signature.") from exc
     handle_event(event)
+
+
+def _code(value: str) -> str:
+    return value.strip().upper()
+
+
+def redeem_promo(user: dict, code: str) -> dict:
+    code, now = _code(code), int(time.time())
+    with auth._connect() as db:
+        promo = db.execute("SELECT * FROM promo_codes WHERE code = %s FOR UPDATE", (code,)).fetchone()
+        if not promo or not promo["active"]:
+            raise HTTPException(404, "Promo code is invalid or disabled.")
+        if promo["expires_at"] and promo["expires_at"] <= now:
+            raise HTTPException(409, "Promo code has expired.")
+        account = db.execute("SELECT * FROM users WHERE google_sub = %s FOR UPDATE",
+                             (user["google_sub"],)).fetchone()
+        if account.get("grant_plan") and (account.get("grant_until") or 0) > now:
+            raise HTTPException(409, "A temporary plan is already active on this account.")
+        if db.execute("SELECT 1 FROM promo_redemptions WHERE code = %s AND google_sub = %s",
+                      (code, user["google_sub"])).fetchone():
+            raise HTTPException(409, "This promo code was already used by this account.")
+        used = db.execute("SELECT count(*) AS count FROM promo_redemptions WHERE code = %s",
+                          (code,)).fetchone()["count"]
+        if used >= promo["max_redemptions"]:
+            raise HTTPException(409, "Promo code has reached its redemption limit.")
+        until = now + promo["duration_days"] * 24 * 60 * 60
+        db.execute("INSERT INTO promo_redemptions (code, google_sub, redeemed_at) VALUES (%s, %s, %s)",
+                   (code, user["google_sub"], now))
+        db.execute("""UPDATE users SET grant_plan = %s, grant_until = %s, grant_source = %s,
+                   credits = GREATEST(credits, %s) WHERE google_sub = %s""",
+                   (promo["plan"], until, f"promo:{code}", PLANS[promo["plan"]]["credits"],
+                    user["google_sub"]))
+        return db.execute("SELECT * FROM users WHERE google_sub = %s", (user["google_sub"],)).fetchone()
+
+
+def admin_users() -> list[dict]:
+    with auth._connect() as db:
+        users = db.execute("SELECT * FROM users ORDER BY email").fetchall()
+    return [{"google_sub": user["google_sub"], "email": user["email"], "name": user["name"],
+             "credits": user["credits"], "stripe_plan": user.get("plan"),
+             "stripe_status": user.get("subscription_status"), "grant_plan": user.get("grant_plan"),
+             "grant_until": user.get("grant_until"), "grant_source": user.get("grant_source"),
+             **subscription_payload(user)} for user in users]
+
+
+def grant_user(google_sub: str, plan: str, duration_days: int) -> dict:
+    now = int(time.time())
+    with auth._connect() as db:
+        user = db.execute("""UPDATE users SET grant_plan = %s, grant_until = %s,
+                          grant_source = 'admin', credits = GREATEST(credits, %s)
+                          WHERE google_sub = %s RETURNING *""",
+                          (plan, now + duration_days * 24 * 60 * 60, PLANS[plan]["credits"],
+                           google_sub)).fetchone()
+        if not user:
+            raise HTTPException(404, "User not found.")
+        return user
+
+
+def revoke_grant(google_sub: str) -> dict:
+    with auth._connect() as db:
+        user = db.execute("""UPDATE users SET grant_plan = NULL, grant_until = NULL,
+                          grant_source = NULL WHERE google_sub = %s RETURNING *""",
+                          (google_sub,)).fetchone()
+        if not user:
+            raise HTTPException(404, "User not found.")
+        return user
+
+
+def create_promo(body, admin: dict) -> dict:
+    code, now = _code(body.code), int(time.time())
+    if body.expires_at and body.expires_at <= now:
+        raise HTTPException(422, "Promo code expiration must be in the future.")
+    with auth._connect() as db:
+        promo = db.execute("""INSERT INTO promo_codes
+            (code, plan, duration_days, max_redemptions, expires_at, created_at, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (code) DO NOTHING RETURNING *""",
+            (code, body.plan, body.duration_days, body.max_redemptions, body.expires_at, now,
+             admin["google_sub"])).fetchone()
+        if not promo:
+            raise HTTPException(409, "A promo code with this name already exists.")
+        return {**promo, "redemptions": 0}
+
+
+def promo_codes() -> list[dict]:
+    with auth._connect() as db:
+        return db.execute("""SELECT p.*, count(r.code)::integer AS redemptions
+            FROM promo_codes p LEFT JOIN promo_redemptions r ON r.code = p.code
+            GROUP BY p.code ORDER BY p.created_at DESC""").fetchall()
+
+
+def set_promo_status(code: str, active: bool) -> dict:
+    with auth._connect() as db:
+        promo = db.execute("UPDATE promo_codes SET active = %s WHERE code = %s RETURNING *",
+                           (active, _code(code))).fetchone()
+        if not promo:
+            raise HTTPException(404, "Promo code not found.")
+        return promo

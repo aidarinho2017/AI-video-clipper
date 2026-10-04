@@ -11,6 +11,7 @@ type User = {
   email: string;
   plan: BillingPlan["id"] | null;
   subscription_status: string;
+  is_admin: boolean;
 };
 
 export default function PricingPage() {
@@ -18,6 +19,7 @@ export default function PricingPage() {
   const [user, setUser] = useState<User>();
   const [plans, setPlans] = useState<BillingPlan[]>([]);
   const [busy, setBusy] = useState("");
+  const [promoBusy, setPromoBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -86,6 +88,22 @@ export default function PricingPage() {
     }
   }
 
+  async function redeemPromo(code: string) {
+    setPromoBusy(true);
+    setError("");
+    try {
+      const account = await apiRequest<User>("/billing/promo-code", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
+      });
+      setUser(account);
+      setNotice(`Promo code applied. Your ${account.plan} plan is active.`);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setPromoBusy(false);
+    }
+  }
+
   if (!user) return <main className="shell"><p>Loading plans…</p></main>;
 
   return (
@@ -94,6 +112,7 @@ export default function PricingPage() {
         <Link className="landing-logo" href="/"><span aria-hidden="true">C</span> Clipper</Link>
         <div>
           <span>{user.email}</span>
+          {user.is_admin && <Link className="text-button" href="/admin">Admin</Link>}
           <button className="text-button" onClick={manageBilling}>Payment & cancellation</button>
           <Link className="text-button" href="/">← Back to workspace</Link>
         </div>
@@ -104,7 +123,8 @@ export default function PricingPage() {
         <p>Upgrade or downgrade securely through Stripe. Any prorated charge or credit is shown before you confirm.</p>
         {notice && <div className="billing-notice">{notice}</div>}
         {error && <div className="billing-error" role="alert">{error}</div>}
-        <PricingCards plans={plans} currentPlan={user.plan} onSelect={changePlan} busy={busy} />
+        <PricingCards plans={plans} currentPlan={user.plan} onSelect={changePlan} busy={busy}
+          onRedeem={redeemPromo} promoBusy={promoBusy} />
       </section>
     </main>
   );

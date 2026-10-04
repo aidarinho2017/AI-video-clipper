@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
     google_client_id: str = ""
+    admin_emails: str = ""
     auth_secret: SecretStr = SecretStr("")
     auth_cookie_secure: bool = False
     database_url: SecretStr = SecretStr("")

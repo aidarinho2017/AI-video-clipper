@@ -15,38 +15,51 @@ export type BillingPlan = {
   configured: boolean;
 };
 
-export function PricingCards({ plans, onSelect, busy, currentPlan }: {
+export function PricingCards({ plans, onSelect, busy, currentPlan, onRedeem, promoBusy }: {
   plans: BillingPlan[];
   onSelect?: (plan: BillingPlan["id"]) => void;
   busy?: string;
   currentPlan?: BillingPlan["id"] | null;
+  onRedeem?: (code: string) => void;
+  promoBusy?: boolean;
 }) {
   const currentPrice = plans.find((plan) => plan.id === currentPlan)?.price;
   return (
-    <div className="pricing-grid">
-      {plans.map((plan) => (
-        <article className={`pricing-card ${plan.id === "pro" ? "featured" : ""}`} key={plan.id}>
-          {plan.id === "pro" && <span className="pricing-popular">MOST POPULAR</span>}
-          <h3>{plan.name} {plan.id === currentPlan && <span className="current-plan">CURRENT</span>}</h3>
-          <div className="pricing-price"><strong>${plan.price}</strong><span>/ month</span></div>
-          <p>{plan.credits.toLocaleString()} credits every month</p>
-          <ul>
-            <li>Up to {Math.max(...plan.clip_counts)} clips per video</li>
-            <li>{plan.model_tiers.length > 1 ? "All AI models" : "Fast AI models"}</li>
-            <li>{plan.clip_lengths.includes("long") ? "15–90 sec clips" : plan.clip_lengths.includes("medium") ? "15–60 sec clips" : "15–30 sec clips"}</li>
-            <li>{plan.editor ? "Full video editor" : "Ready-to-post MP4 exports"}</li>
-          </ul>
-          {onSelect ? (
-            <button className={plan.id === "pro" ? "primary" : "landing-secondary"}
-                    disabled={Boolean(busy) || !plan.configured || plan.id === currentPlan} onClick={() => onSelect(plan.id)}>
-              {plan.id === currentPlan ? "Current plan" : busy === plan.id ? "Opening Stripe…"
-                : plan.configured ? `${currentPrice && plan.price > currentPrice ? "Upgrade" : currentPrice ? "Downgrade" : "Choose"} to ${plan.name}`
-                : "Configure Stripe price"}
-            </button>
-          ) : <Link className={plan.id === "pro" ? "primary" : "landing-secondary"} href="/login">Choose {plan.name}</Link>}
-        </article>
-      ))}
-    </div>
+    <>
+      <div className="pricing-grid">
+        {plans.map((plan) => (
+          <article className={`pricing-card ${plan.id === "pro" ? "featured" : ""}`} key={plan.id}>
+            {plan.id === "pro" && <span className="pricing-popular">MOST POPULAR</span>}
+            <h3>{plan.name} {plan.id === currentPlan && <span className="current-plan">CURRENT</span>}</h3>
+            <div className="pricing-price"><strong>${plan.price}</strong><span>/ month</span></div>
+            <p>{plan.credits.toLocaleString()} credits every month</p>
+            <ul>
+              <li>Up to {Math.max(...plan.clip_counts)} clips per video</li>
+              <li>{plan.model_tiers.length > 1 ? "All AI models" : "Fast AI models"}</li>
+              <li>{plan.clip_lengths.includes("long") ? "15–90 sec clips" : plan.clip_lengths.includes("medium") ? "15–60 sec clips" : "15–30 sec clips"}</li>
+              <li>{plan.editor ? "Full video editor" : "Ready-to-post MP4 exports"}</li>
+            </ul>
+            {onSelect ? (
+              <button className={plan.id === "pro" ? "primary" : "landing-secondary"}
+                      disabled={Boolean(busy) || !plan.configured || plan.id === currentPlan} onClick={() => onSelect(plan.id)}>
+                {plan.id === currentPlan ? "Current plan" : busy === plan.id ? "Opening Stripe…"
+                  : plan.configured ? `${currentPrice && plan.price > currentPrice ? "Upgrade" : currentPrice ? "Downgrade" : "Choose"} to ${plan.name}`
+                  : "Configure Stripe price"}
+              </button>
+            ) : <Link className={plan.id === "pro" ? "primary" : "landing-secondary"} href="/login">Choose {plan.name}</Link>}
+          </article>
+        ))}
+      </div>
+      {onRedeem ? <form className="promo-redeem" onSubmit={(event) => {
+        event.preventDefault();
+        const code = String(new FormData(event.currentTarget).get("code") || "").trim();
+        if (code) onRedeem(code);
+      }}>
+        <label htmlFor="promo-code">Have a promo code?</label>
+        <div><input id="promo-code" name="code" minLength={4} maxLength={32} required placeholder="Enter promo code" />
+          <button className="landing-secondary" disabled={promoBusy}>{promoBusy ? "Applying…" : "Apply code"}</button></div>
+      </form> : <p className="promo-signin">Have a promo code? <Link href="/login">Sign in to redeem it</Link>.</p>}
+    </>
   );
 }
 

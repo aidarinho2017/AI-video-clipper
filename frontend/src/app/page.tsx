@@ -50,6 +50,8 @@ type User = {
   subscription_status: string;
   cancel_at_period_end: boolean;
   current_period_end: number | null;
+  subscription_source: "stripe" | "admin" | "promo" | null;
+  is_admin: boolean;
   entitlements: Entitlements;
 };
 type ModelOption = {
@@ -64,13 +66,15 @@ type ModelCatalog = {
   models: ModelOption[];
 };
 
-function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onManage, onLogout, onBack }: {
+function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onRedeem, promoBusy, onManage, onLogout, onBack }: {
   user: User;
   plans: BillingPlan[];
   busy: string;
   notice: string;
   error: string;
   onCheckout: (plan: BillingPlan["id"]) => void;
+  onRedeem: (code: string) => void;
+  promoBusy: boolean;
   onManage: () => void;
   onLogout: () => void;
   onBack?: () => void;
@@ -96,7 +100,8 @@ function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onMana
         {error && <div className="billing-error" role="alert">{error}</div>}
         {paymentProblem
           ? <button className="primary billing-manage" onClick={onManage}>Manage billing ↗</button>
-          : <PricingCards plans={plans} onSelect={onCheckout} busy={busy} />}
+          : <PricingCards plans={plans} onSelect={onCheckout} busy={busy}
+              onRedeem={onRedeem} promoBusy={promoBusy} />}
       </section>
     </main>
   );
@@ -107,6 +112,7 @@ export default function Home() {
   const [plans, setPlans] = useState<BillingPlan[]>([]);
   const [showPricing, setShowPricing] = useState(false);
   const [billingBusy, setBillingBusy] = useState("");
+  const [promoBusy, setPromoBusy] = useState(false);
   const [billingNotice, setBillingNotice] = useState("");
   const [url, setUrl] = useState("");
   const [job, setJob] = useState<Job | null>(null);
@@ -292,6 +298,23 @@ export default function Home() {
       setError((reason as Error).message);
     }
   }
+
+  async function redeemPromo(code: string) {
+    setPromoBusy(true);
+    setError("");
+    try {
+      const account = await apiRequest<User>("/billing/promo-code", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
+      });
+      setUser(account);
+      setShowPricing(false);
+      setBillingNotice(`Promo code applied. Your ${account.plan} plan is active.`);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setPromoBusy(false);
+    }
+  }
   const clip = job?.clips[selected];
 
   useEffect(() => {
@@ -311,6 +334,7 @@ export default function Home() {
   const needsBillingRecovery = !["active", "inactive", "canceled"].includes(user.subscription_status);
   if (showPricing || needsBillingRecovery) return <SubscriptionGate user={user} plans={plans}
     busy={billingBusy} notice={billingNotice} error={error} onCheckout={checkout}
+    onRedeem={redeemPromo} promoBusy={promoBusy}
     onManage={manageBilling} onLogout={logout}
     onBack={needsBillingRecovery ? undefined : () => setShowPricing(false)} />;
 
@@ -325,6 +349,7 @@ export default function Home() {
           <Link className="text-button" href="/pricing">Plans</Link>
           <button className="text-button" onClick={manageBilling}>Billing</button>
         </> : <span className="preview-badge">Preview</span>}
+        {user.is_admin && <Link className="text-button" href="/admin">Admin</Link>}
         <button className="text-button" onClick={logout}>Sign out</button>
       </div>
       {error && (

@@ -56,12 +56,29 @@ def init():
         )""")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_stripe_customer ON users(stripe_customer_id)")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_stripe_subscription ON users(stripe_subscription_id)")
+        db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS grant_plan TEXT")
+        db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS grant_until BIGINT")
+        db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS grant_source TEXT")
         db.execute("""CREATE TABLE IF NOT EXISTS billing_events (
             event_id TEXT PRIMARY KEY, processed_at BIGINT NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS credit_adjustments (
             reference TEXT PRIMARY KEY,
             google_sub TEXT NOT NULL REFERENCES users(google_sub) ON DELETE CASCADE,
             amount INTEGER NOT NULL CHECK (amount >= 0))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS promo_codes (
+            code TEXT PRIMARY KEY,
+            plan TEXT NOT NULL,
+            duration_days INTEGER NOT NULL CHECK (duration_days > 0),
+            max_redemptions INTEGER NOT NULL CHECK (max_redemptions > 0),
+            expires_at BIGINT,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at BIGINT NOT NULL,
+            created_by TEXT NOT NULL REFERENCES users(google_sub))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS promo_redemptions (
+            code TEXT NOT NULL REFERENCES promo_codes(code),
+            google_sub TEXT NOT NULL REFERENCES users(google_sub) ON DELETE CASCADE,
+            redeemed_at BIGINT NOT NULL,
+            PRIMARY KEY (code, google_sub))""")
 
 
 def close():
@@ -154,6 +171,18 @@ def current_user(request: Request) -> dict:
     return _user(data)
 
 
+def is_admin(user: dict) -> bool:
+    allowed = {email.strip().lower() for email in settings.admin_emails.split(",") if email.strip()}
+    return user["email"].lower() in allowed
+
+
+def admin_user(request: Request) -> dict:
+    user = current_user(request)
+    if not is_admin(user):
+        raise HTTPException(403, "Administrator access is required.")
+    return user
+
+
 def media_user(request: Request) -> dict:
     token = request.query_params.get("media_token")
     if not token:
@@ -200,4 +229,5 @@ def refund_once(google_sub: str, amount: int, reference: str) -> int:
 
 
 def public_user(user: dict) -> dict:
-    return {key: user[key] for key in ("email", "name", "picture", "credits")}
+    return {**{key: user[key] for key in ("email", "name", "picture", "credits")},
+            "is_admin": is_admin(user)}

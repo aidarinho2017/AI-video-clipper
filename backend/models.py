@@ -49,6 +49,25 @@ class CheckoutRequest(BaseModel):
     plan: Literal["starter", "pro", "studio"]
 
 
+class PromoCodeRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=32, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class GrantRequest(BaseModel):
+    plan: Literal["starter", "pro", "studio"]
+    duration_days: int = Field(ge=1, le=3650)
+
+
+class PromoCreateRequest(GrantRequest):
+    code: str = Field(min_length=4, max_length=32, pattern=r"^[A-Za-z0-9_-]+$")
+    max_redemptions: int = Field(ge=1, le=100_000)
+    expires_at: int | None = Field(default=None, gt=0)
+
+
+class PromoStatusRequest(BaseModel):
+    active: bool
+
+
 class TranscriptSegment(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False, str_strip_whitespace=True)
     start: float = Field(ge=0)

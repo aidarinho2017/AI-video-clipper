@@ -29,7 +29,7 @@ def reset_database():
         auth.init()
         try:
             with auth._connect() as db:
-                db.execute("TRUNCATE credit_adjustments, billing_events, users")
+                db.execute("TRUNCATE promo_redemptions, promo_codes, credit_adjustments, billing_events, users")
         finally:
             auth.close()
 
@@ -94,6 +94,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(JobRequest(youtube_url="https://youtu.be/dQw4w9WgXcQ").clip_count, 5)
         with self.assertRaises(ValueError):
             JobRequest(youtube_url="https://youtu.be/dQw4w9WgXcQ", clip_count=2)
+        paid = {"plan": "studio", "subscription_status": "active", "current_period_end": 500,
+                "cancel_at_period_end": False, "grant_plan": "starter", "grant_until": 200,
+                "grant_source": "promo:TEST"}
+        self.assertEqual(billing.effective_subscription(paid, now=100)["plan"], "starter")
+        self.assertEqual(billing.effective_subscription(paid, now=300)["plan"], "studio")
 
     @requires_postgres
     def test_job_api_lifecycle(self):
@@ -226,6 +231,48 @@ class PipelineTests(unittest.TestCase):
             with patch("backend.billing.stripe.Webhook.construct_event", side_effect=ValueError):
                 self.assertEqual(client.post("/billing/webhook", content=b"{}",
                                              headers={"Stripe-Signature": "bad"}).status_code, 400)
+
+    @requires_postgres
+    def test_admin_grants_and_promo_codes(self):
+        reset_database()
+        secret = SecretStr("test-secret-that-is-at-least-32-characters")
+        with patch.object(settings, "auth_secret", secret), patch.object(
+                settings, "admin_emails", "admin@example.com"), patch.object(
+                settings, "database_url", SecretStr(TEST_DATABASE_URL)), TestClient(app) as client:
+            admin = self.login(client, sub="admin", subscribed=False)
+            self.assertTrue(admin["is_admin"])
+            promo = client.post("/admin/promo-codes", json={
+                "code": "creator30", "plan": "starter", "duration_days": 30,
+                "max_redemptions": 1,
+            })
+            self.assertEqual(promo.status_code, 200)
+            self.assertEqual(promo.json()["code"], "CREATOR30")
+
+            paid = self.login(client, sub="paid-user")
+            redeemed = client.post("/billing/promo-code", json={"code": "creator30"})
+            self.assertEqual(redeemed.status_code, 200)
+            self.assertEqual((redeemed.json()["plan"], redeemed.json()["subscription_source"]),
+                             ("starter", "promo"))
+            self.assertEqual(redeemed.json()["credits"], 2000)
+            self.assertEqual(client.post("/billing/promo-code", json={"code": "creator30"}).status_code, 409)
+            with auth._connect() as db:
+                db.execute("UPDATE users SET grant_until = 1 WHERE google_sub = 'paid-user'")
+            fallback = client.get("/auth/me").json()
+            self.assertEqual((fallback["plan"], fallback["subscription_source"]), ("studio", "stripe"))
+
+            self.login(client, sub="ordinary", subscribed=False)
+            self.assertEqual(client.get("/admin/users").status_code, 403)
+            self.assertEqual(client.post("/billing/promo-code", json={"code": "CREATOR30"}).status_code, 409)
+
+            self.login(client, sub="admin", subscribed=False)
+            granted = client.post("/admin/users/ordinary/grant",
+                                  json={"plan": "pro", "duration_days": 7})
+            self.assertEqual((granted.json()["plan"], granted.json()["credits"]), ("pro", 500))
+            self.assertEqual(client.post("/admin/users/ordinary/revoke-grant").status_code, 200)
+            codes = client.get("/admin/promo-codes").json()["promo_codes"]
+            self.assertEqual(codes[0]["redemptions"], 1)
+            disabled = client.post("/admin/promo-codes/CREATOR30/status", json={"active": False})
+            self.assertFalse(disabled.json()["active"])
 
     @requires_postgres
     def test_editor_api_lifecycle(self):

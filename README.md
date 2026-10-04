@@ -45,6 +45,8 @@ Edit `backend/.env` and add the keys for the providers you want: `GEMINI_API_KEY
 
 Create a Google OAuth 2.0 **Web application** client, add `http://localhost:3000` as an authorized JavaScript origin, then set `GOOGLE_CLIENT_ID` to its client ID. Set `AUTH_SECRET` to a random value of at least 32 characters. For HTTPS deployment, also set `AUTH_COOKIE_SECURE=true`.
 
+To enable the admin panel, set `ADMIN_EMAILS` to a comma-separated list of Google account emails, for example `owner@example.com,team@example.com`. Admins can open `/admin` to inspect subscriptions, grant temporary plans, and create promo codes that activate plans without Stripe.
+
 Create a PostgreSQL database and set `DATABASE_URL`, for example `postgresql://clipper:password@localhost/clipper`. The backend creates its tables at startup and stops with a clear error if the database is unavailable.
 
 ### Stripe test subscriptions
@@ -112,6 +114,7 @@ DATA_DIR=/data
 AUTH_SECRET=at-least-32-random-characters
 AUTH_COOKIE_SECURE=true
 GOOGLE_CLIENT_ID=...
+ADMIN_EMAILS=owner@example.com
 GEMINI_API_KEY=...
 ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...

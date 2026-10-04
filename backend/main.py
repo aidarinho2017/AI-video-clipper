@@ -10,7 +10,9 @@ from fastapi.responses import FileResponse
 
 from . import auth, billing
 from .config import settings
-from .models import CheckoutRequest, EditorExportRequest, GoogleCredential, JobRequest, MediaTokenRequest, PipelineError
+from .models import (CheckoutRequest, EditorExportRequest, GoogleCredential, GrantRequest,
+                     JobRequest, MediaTokenRequest, PipelineError, PromoCodeRequest,
+                     PromoCreateRequest, PromoStatusRequest)
 from .services import analysis, editor, jobs, video
 from .services.youtube import canonical_url
 
@@ -100,10 +102,49 @@ def change_billing_plan(body: CheckoutRequest, user: dict = Depends(auth.current
     return {"url": billing.change_plan(user, body.plan)}
 
 
+@app.post("/billing/promo-code")
+def redeem_promo_code(body: PromoCodeRequest, user: dict = Depends(auth.current_user)):
+    user = billing.redeem_promo(user, body.code)
+    return {**auth.public_user(user), **billing.subscription_payload(user)}
+
+
 @app.post("/billing/webhook")
 async def stripe_webhook(request: Request):
     billing.webhook(await request.body(), request.headers.get("stripe-signature"))
     return {"received": True}
+
+
+@app.get("/admin/users")
+def admin_users(admin: dict = Depends(auth.admin_user)):
+    return {"users": billing.admin_users()}
+
+
+@app.post("/admin/users/{google_sub}/grant")
+def admin_grant_user(google_sub: str, body: GrantRequest, admin: dict = Depends(auth.admin_user)):
+    user = billing.grant_user(google_sub, body.plan, body.duration_days)
+    return {**auth.public_user(user), **billing.subscription_payload(user)}
+
+
+@app.post("/admin/users/{google_sub}/revoke-grant")
+def admin_revoke_user_grant(google_sub: str, admin: dict = Depends(auth.admin_user)):
+    user = billing.revoke_grant(google_sub)
+    return {**auth.public_user(user), **billing.subscription_payload(user)}
+
+
+@app.get("/admin/promo-codes")
+def admin_promo_codes(admin: dict = Depends(auth.admin_user)):
+    return {"promo_codes": billing.promo_codes()}
+
+
+@app.post("/admin/promo-codes")
+def admin_create_promo(body: PromoCreateRequest, admin: dict = Depends(auth.admin_user)):
+    return billing.create_promo(body, admin)
+
+
+@app.post("/admin/promo-codes/{code}/status")
+def admin_set_promo_status(code: str, body: PromoStatusRequest,
+                           admin: dict = Depends(auth.admin_user)):
+    return billing.set_promo_status(code, body.active)
 
 
 def editor_user(user: dict = Depends(auth.current_user)):
