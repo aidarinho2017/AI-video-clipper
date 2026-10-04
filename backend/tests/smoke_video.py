@@ -23,7 +23,7 @@ def main():
         assert 14.9 <= probe(target) <= 15.1
         info = json.loads(run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(target)]))
         stream = next(s for s in info["streams"] if s["codec_type"] == "video")
-        assert (stream["width"], stream["height"], stream["codec_name"]) == (1080, 1920, "h264")
+        assert (stream["width"], stream["height"], stream["codec_name"]) == (720, 1280, "h264")
         run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(target), "-f", "null", "-"])
         silent_source = folder / "silent-source.mp4"
         run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24", "-t", "6", "-c:v", "libx264", "-preset", "ultrafast", str(silent_source)])

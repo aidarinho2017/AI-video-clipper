@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 from ..config import settings
 from ..models import PipelineError
 
+VIDEO_FORMAT = "bv*[vcodec^=avc1][height<=1080]+ba/b[vcodec^=avc1][height<=1080]"
+
 
 def canonical_url(value: str) -> str:
     try:
@@ -103,8 +105,17 @@ def download(url: str, folder: Path, max_seconds: int) -> tuple[Path, Path | Non
         if caption:
             language, automatic = caption
             caption_args = ["--write-auto-subs" if automatic else "--write-subs", "--sub-langs", language, "--sub-format", "json3"]
-        subprocess.run(base + caption_args + ["-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mp4",
-                              "-o", str(folder / "source.%(ext)s"), url], capture_output=True, text=True, check=True, timeout=1800)
+        download_args = ["-f", VIDEO_FORMAT, "--merge-output-format", "mp4",
+                         "-o", str(folder / "source.%(ext)s"), url]
+        try:
+            subprocess.run(base + caption_args + download_args, capture_output=True, text=True, check=True, timeout=1800)
+        except subprocess.CalledProcessError as exc:
+            if not caption_args or "Unable to download video subtitles" not in (exc.stderr or ""):
+                raise
+            logging.getLogger(__name__).warning("YouTube subtitles unavailable; retrying video without them")
+            for path in folder.glob("source.*.json3"):
+                path.unlink(missing_ok=True)
+            subprocess.run(base + download_args, capture_output=True, text=True, check=True, timeout=1800)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         error = str(getattr(exc, "stderr", "") or exc)
         logging.getLogger(__name__).error("yt-dlp failure: %s", error[-4000:])

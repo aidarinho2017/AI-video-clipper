@@ -2,6 +2,8 @@ import base64
 import gzip
 import json
 import os
+import signal
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -388,6 +390,58 @@ class PipelineTests(unittest.TestCase):
             SecretStr(base64.b64encode(b"not gzip").decode()),
         ), self.assertRaisesRegex(PipelineError, "YOUTUBE_COOKIES_GZIP_BASE64"):
             youtube._cookie_args(Path(temp))
+
+    def test_youtube_subtitle_failure_retries_h264_without_captions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder, calls = Path(temp), []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                if "--dump-single-json" in args:
+                    return SimpleNamespace(stdout=json.dumps({
+                        "duration": 120, "automatic_captions": {"en": [{}]},
+                    }))
+                if "--write-auto-subs" in args:
+                    (folder / "source.en.json3").write_text("partial")
+                    raise subprocess.CalledProcessError(
+                        1, args, stderr="Unable to download video subtitles for 'en': HTTP Error 429"
+                    )
+                (folder / "source.mp4").write_bytes(b"video")
+                return SimpleNamespace(stdout="")
+
+            with patch.object(youtube, "_cookie_args", return_value=[]), patch.object(
+                youtube.subprocess, "run", side_effect=fake_run
+            ):
+                source, captions = youtube.download("https://youtu.be/dQw4w9WgXcQ", folder, 7200)
+
+            self.assertEqual(source, folder / "source.mp4")
+            self.assertIsNone(captions)
+            self.assertIn(youtube.VIDEO_FORMAT, calls[1])
+            self.assertNotIn("--write-auto-subs", calls[2])
+
+    def test_low_memory_render_and_sigkill_error(self):
+        clip = ClipCandidate.model_validate(candidate(10))
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "clip.mp4"
+
+            def fake_run(args, timeout=1800):
+                Path(args[-1]).write_bytes(b"video")
+                return ""
+
+            with patch.object(video, "_face_center", return_value=0.5), patch.object(
+                video, "run", side_effect=fake_run
+            ) as media_run:
+                video.render(Path(temp) / "source.mp4", target, clip, "[10.00-20.00] Caption")
+            args = media_run.call_args.args[0]
+            self.assertIn("scale=720:1280:force_original_aspect_ratio=increase", args[args.index("-vf") + 1])
+            self.assertEqual(args[args.index("-preset") + 1], "veryfast")
+            self.assertEqual(args[args.index("-threads") + 1], "1")
+
+        killed = subprocess.CalledProcessError(-signal.SIGKILL, ["ffmpeg"], stderr="")
+        with patch.object(video.subprocess, "run", side_effect=killed), self.assertRaisesRegex(
+            PipelineError, "memory limit"
+        ):
+            video.run(["ffmpeg"])
 
     def test_generated_caption_cues_and_face_fallback(self):
         clip = ClipCandidate.model_validate(candidate(10))

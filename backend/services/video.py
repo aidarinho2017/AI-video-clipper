@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import re
+import signal
 import subprocess
 import textwrap
 from pathlib import Path
@@ -21,7 +22,9 @@ def run(args: list[str], timeout: int = 1800) -> str:
     except subprocess.TimeoutExpired as exc:
         raise PipelineError("Video processing timed out. Try a shorter source.") from exc
     except subprocess.CalledProcessError as exc:
-        log.error("Media command failed: %s", exc.stderr[-4000:])
+        log.error("Media command failed: %s", (exc.stderr or "")[-4000:])
+        if exc.returncode == -signal.SIGKILL:
+            raise PipelineError("Video rendering exceeded the server memory limit. Try again or use a larger server.") from exc
         raise PipelineError("Video processing failed. Check that the source contains playable video and audio.") from exc
 
 
@@ -143,13 +146,13 @@ def _caption_cues(transcript: str, clip: ClipCandidate) -> list[tuple[float, flo
 def _write_generated_captions(path: Path, transcript: str, clip: ClipCandidate):
     header = """[Script Info]
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: 720
+PlayResY: 1280
 WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Liberation Sans,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,1,2,90,90,230,1
+Style: Default,Liberation Sans,43,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,1,2,60,60,153,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -167,14 +170,14 @@ def render(source: Path, target: Path, clip: ClipCandidate, transcript: str):
     caption_file = target.with_suffix(".captions.ass")
     _write_generated_captions(caption_file, transcript, clip)
     center = _face_center(source, clip)
-    crop = f"crop=1080:1920:max(0\\,min(iw-ow\\,iw*{center:.4f}-ow/2)):(ih-oh)/2"
+    crop = f"crop=720:1280:max(0\\,min(iw-ow\\,iw*{center:.4f}-ow/2)):(ih-oh)/2"
     escaped = caption_file.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
-    filters = ("scale=1080:1920:force_original_aspect_ratio=increase," + crop +
+    filters = ("scale=720:1280:force_original_aspect_ratio=increase," + crop +
                f",setsar=1,subtitles=filename='{escaped}'")
     try:
         run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", str(clip.start), "-i", str(source),
              "-t", str(clip.end - clip.start), "-map", "0:v:0", "-map", "0:a:0",
-             "-vf", filters, "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
+             "-vf", filters, "-c:v", "libx264", "-preset", "veryfast", "-threads", "1", "-crf", "22", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(temporary)])
         temporary.replace(target)
     finally:
