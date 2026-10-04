@@ -1,3 +1,5 @@
+import base64
+import gzip
 import json
 import os
 import tempfile
@@ -368,6 +370,24 @@ class PipelineTests(unittest.TestCase):
                 {"tStartMs": 3000, "dDurationMs": 1000},
             ]}))
             self.assertEqual(transcript(path), "[1.00-3.00] Hello world")
+
+    def test_youtube_cookie_secret_becomes_private_file(self):
+        cookies = b"# Netscape Cookie File\n"
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            settings, "youtube_cookies_gzip_base64",
+            SecretStr(base64.b64encode(gzip.compress(cookies)).decode()),
+        ):
+            args = youtube._cookie_args(Path(temp))
+            cookie_file = Path(args[1])
+            self.assertEqual(args[0], "--cookies")
+            self.assertEqual(cookie_file.read_bytes(), cookies)
+            self.assertEqual(cookie_file.stat().st_mode & 0o777, 0o600)
+
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            settings, "youtube_cookies_gzip_base64",
+            SecretStr(base64.b64encode(b"not gzip").decode()),
+        ), self.assertRaisesRegex(PipelineError, "YOUTUBE_COOKIES_GZIP_BASE64"):
+            youtube._cookie_args(Path(temp))
 
     def test_generated_caption_cues_and_face_fallback(self):
         clip = ClipCandidate.model_validate(candidate(10))

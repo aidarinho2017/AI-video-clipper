@@ -159,7 +159,7 @@ export default function AdminPage() {
         <div>
           <h2>Create promo code</h2>
           <form className="admin-promo-form" onSubmit={createPromo}>
-            <label>Code<input name="code" required minLength={4} maxLength={32} pattern="[A-Za-z0-9_-]+" placeholder="CREATOR30" /></label>
+            <label>Code<input name="code" required minLength={4} maxLength={32} pattern="[A-Za-z0-9_\-]+" placeholder="CREATOR30" /></label>
             <label>Plan<select name="plan" defaultValue="pro"><option value="starter">Starter</option><option value="pro">Pro</option><option value="studio">Studio</option></select></label>
             <label>Access days<input name="duration_days" type="number" min="1" max="3650" defaultValue="30" required /></label>
             <label>Maximum redemptions<input name="max_redemptions" type="number" min="1" max="100000" defaultValue="1" required /></label>
