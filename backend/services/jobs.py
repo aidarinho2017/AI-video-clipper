@@ -30,6 +30,8 @@ def recover():
         try:
             state = json.loads(path.read_text())
             if state["status"] in {"queued", "processing"}:
+                if state.get("source_type") == "upload":
+                    (path.parent / "source.partial").unlink(missing_ok=True)
                 refunded = auth.refund_once(state.get("owner_id", ""), state.get("credits_reserved", 0),
                                             f"job:{state['id']}:refund") if state.get("owner_id") else 0
                 state.update(status="failed", error="Backend restarted during processing. Please generate again.")
@@ -40,13 +42,14 @@ def recover():
 
 
 def create(url: str, model_id: str = analysis.DEFAULT_MODEL, clip_length: str = "short",
-           clip_count: int = 5, owner_id: str = "") -> dict:
+           clip_count: int = 5, owner_id: str = "", source_type: str = "youtube") -> dict:
     job_id = str(uuid4())
     folder = settings.data_dir / job_id
     folder.mkdir(parents=True)
-    state = dict(id=job_id, status="queued", stage="downloading", model=model_id,
+    state = dict(id=job_id, status="queued", stage="uploading" if source_type == "upload" else "downloading", model=model_id,
+                 source_type=source_type,
                  clip_length=clip_length, clip_count=clip_count,
-                 owner_id=owner_id, credits_reserved=clip_count, credits_refunded=0,
+                 owner_id=owner_id, credits_reserved=0 if source_type == "upload" else clip_count, credits_refunded=0,
                  completed_clips=0, clips=[], error=None)
     save(folder, state)
     return state
@@ -63,11 +66,15 @@ def process(job_id: str, url: str, model_id: str = analysis.DEFAULT_MODEL, instr
 
     try:
         state = read(job_id)
-        update("downloading")
-        source, captions = youtube.download(url, folder, settings.max_video_seconds)
+        if state.get("source_type", "youtube") == "upload":
+            update("preparing")
+            source, captions = folder / "source.upload", None
+        else:
+            update("downloading")
+            source, captions = youtube.download(url, folder, settings.max_video_seconds)
         duration = video.probe(source)
         if not 75 <= duration <= settings.max_video_seconds:
-            raise PipelineError("Downloaded video duration is outside the configured limits.")
+            raise PipelineError("Video duration is outside the configured limits.")
         if captions:
             transcript = youtube.transcript(captions)
         else:

@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 Score = Annotated[int, Field(strict=True, ge=0, le=100, description="0 = absent/weak, 100 = exceptional")]
 
@@ -29,12 +29,19 @@ class CandidateResponse(BaseModel):
     candidates: list[ClipCandidate]
 
 
-class JobRequest(BaseModel):
-    youtube_url: str = Field(min_length=1, max_length=2048)
+class JobOptions(BaseModel):
     model: str = Field(default="gemini-fast", min_length=1, max_length=80)
     instructions: str = Field(default="", max_length=2000)
     clip_length: Literal["short", "medium", "long"] = "short"
     clip_count: Literal[1, 3, 5, 10] = 5
+
+
+class JobRequest(JobOptions):
+    youtube_url: str = Field(min_length=1, max_length=2048)
+
+
+class UploadJobOptions(JobOptions):
+    clip_count: Annotated[Literal[1, 3, 5, 10], BeforeValidator(lambda value: int(value) if isinstance(value, str) else value)] = 5
 
 
 class GoogleCredential(BaseModel):

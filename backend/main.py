@@ -7,12 +7,13 @@ from uuid import UUID
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from . import auth, billing
 from .config import settings
 from .models import (CheckoutRequest, EditorExportRequest, GoogleCredential, GrantRequest,
-                     JobRequest, MediaTokenRequest, PipelineError, PromoCodeRequest,
-                     PromoCreateRequest, PromoStatusRequest)
+                     JobOptions, JobRequest, MediaTokenRequest, PipelineError, PromoCodeRequest,
+                     PromoCreateRequest, PromoStatusRequest, UploadJobOptions)
 from .services import analysis, editor, jobs, video
 from .services.youtube import canonical_url
 
@@ -79,7 +80,10 @@ def logout(response: Response):
 
 @app.get("/ai/models")
 def ai_models():
-    return analysis.catalog()
+    return {**analysis.catalog(), "upload_limits": {
+        "max_bytes": settings.max_upload_bytes, "min_seconds": 75,
+        "max_seconds": settings.max_video_seconds,
+    }}
 
 
 @app.get("/billing/plans")
@@ -161,15 +165,7 @@ def create_job(body: JobRequest, background: BackgroundTasks, user: dict = Depen
         url = canonical_url(body.youtube_url)
     except PipelineError as exc:
         raise HTTPException(422, str(exc)) from exc
-    try:
-        model = analysis.get_model(body.model)
-    except PipelineError as exc:
-        status = 503 if body.model in analysis.MODELS else 422
-        raise HTTPException(status, str(exc)) from exc
-    billing.ensure_job(user, model[3], body.clip_count, body.clip_length)
-    missing = [name for name in ("ffmpeg", "ffprobe") if not shutil.which(name)]
-    if missing:
-        raise HTTPException(503, f"Install missing dependencies: {', '.join(missing)}.")
+    check_job(body, user)
     if not jobs.lock.acquire(blocking=False):
         raise HTTPException(409, "A video is already processing. Wait for it to finish.")
     charged = False
@@ -184,6 +180,77 @@ def create_job(body: JobRequest, background: BackgroundTasks, user: dict = Depen
         if charged:
             auth.refund(user["google_sub"], body.clip_count)
         jobs.lock.release()
+        raise
+
+
+def check_job(body: JobOptions, user: dict):
+    try:
+        model = analysis.get_model(body.model)
+    except PipelineError as exc:
+        status = 503 if body.model in analysis.MODELS else 422
+        raise HTTPException(status, str(exc)) from exc
+    billing.ensure_job(user, model[3], body.clip_count, body.clip_length)
+    missing = [name for name in ("ffmpeg", "ffprobe") if not shutil.which(name)]
+    if missing:
+        raise HTTPException(503, f"Install missing dependencies: {', '.join(missing)}.")
+
+
+@app.post("/jobs/upload", status_code=202)
+async def upload_job(request: Request, background: BackgroundTasks,
+                     body: UploadJobOptions = Depends(), user: dict = Depends(auth.current_user)):
+    check_job(body, user)
+    if not settings.gemini_api_key.get_secret_value():
+        raise HTTPException(503, "Add GEMINI_API_KEY to transcribe uploaded videos.")
+    if user["credits"] < body.clip_count:
+        raise HTTPException(402, "Not enough credits.")
+    length = request.headers.get("content-length")
+    if length:
+        try:
+            size = int(length)
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid Content-Length header.") from exc
+        if size < 0:
+            raise HTTPException(400, "Invalid Content-Length header.")
+        if size > settings.max_upload_bytes:
+            raise HTTPException(413, "Video exceeds the configured upload limit.")
+    if not jobs.lock.acquire(blocking=False):
+        raise HTTPException(409, "A video is already processing. Wait for it to finish.")
+    charged, folder = False, None
+    try:
+        state = jobs.create("", body.model, body.clip_length, body.clip_count,
+                            user["google_sub"], source_type="upload")
+        folder = settings.data_dir / state["id"]
+        temporary, size = folder / "source.partial", 0
+        with temporary.open("wb") as output:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise HTTPException(413, "Video exceeds the configured upload limit.")
+                output.write(chunk)
+        if not size:
+            raise HTTPException(422, "Choose a non-empty video file.")
+        try:
+            duration = await run_in_threadpool(video.probe, temporary)
+        except PipelineError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not 75 <= duration <= settings.max_video_seconds:
+            raise HTTPException(422, f"Choose a video between 75 seconds and {settings.max_video_seconds // 60} minutes.")
+        temporary.replace(folder / "source.upload")
+        credits = auth.charge(user["google_sub"], body.clip_count)
+        charged = True
+        state.update(stage="preparing", credits_reserved=body.clip_count)
+        jobs.save(folder, state)
+        background.add_task(jobs.process, state["id"], "", body.model, body.instructions,
+                            body.clip_length, body.clip_count)
+        return {**{key: value for key, value in state.items() if key != "owner_id"}, "credits": credits}
+    except BaseException:
+        try:
+            if charged:
+                auth.refund(user["google_sub"], body.clip_count)
+        finally:
+            if folder is not None:
+                shutil.rmtree(folder, ignore_errors=True)
+            jobs.lock.release()
         raise
 
 

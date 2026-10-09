@@ -69,6 +69,8 @@ Open http://localhost:3000. Keep the backend running while a job processes. Use 
 
 ## How it works
 
+On the generation page, choose YouTube or Upload video. File uploads are available on all paid plans with the same model, clip-count, and clip-length restrictions. Uploaded videos must contain video and audio, last 75 seconds to `MAX_VIDEO_SECONDS` (2 hours by default), and fit within `MAX_UPLOAD_BYTES` (2 GiB by default). Gemini is required to transcribe uploaded audio, even when another provider analyzes the transcript. Credits are charged only after upload validation. Uploads stream directly to the backend; test production proxy size and timeout limits before using large files.
+
 Browser → FastAPI background job → yt-dlp video and timestamped captions → selected AI model → validation/ranking → face-aware crop and captioned FFmpeg render → MP4 files. If captions are unavailable, FFmpeg extracts audio and Gemini creates a timestamped transcript first.
 
 The standalone editor imports multiple local videos and audio files. Add sources to the timeline, split and trim clips, mix waveform-backed audio tracks with per-clip volume and fades, add crossfades, reframe for social aspect ratios, position captions directly in the preview, and export one MP4.
@@ -85,12 +87,14 @@ Each job lives in `backend/data/<uuid>/` with its source, extracted audio, candi
 - `POST /auth/google`: exchanges a Google credential for the user and a signed session token.
 - `POST /auth/media-token`: creates a four-hour, path-bound URL token for authenticated media playback.
 - `GET /ai/models`: configured Gemini, Anthropic, and OpenAI models.
+- `GET /ai/models` also returns `upload_limits` with `max_bytes`, `min_seconds`, and `max_seconds` for the upload UI.
 - `GET /billing/plans`: plan prices, credits, and entitlements.
 - `POST /billing/checkout`: authenticated Stripe test Checkout session.
 - `POST /billing/portal`: authenticated Stripe Customer Portal session.
 - `POST /billing/webhook`: signed Stripe webhook receiver.
 - `POST /jobs`: `{ "youtube_url": "https://www.youtube.com/watch?v=...", "model": "gemini-fast", "instructions": "Prefer practical advice", "clip_length": "short", "clip_count": 5 }`, returns 202 and a job ID; 409 when busy. Length is `short`, `medium`, or `long`; count is 1, 3, 5, or 10.
 - `GET /jobs/{id}`: actual stage, status, completed count, scores and errors.
+- `POST /jobs/upload?model=gemini-fast&clip_length=short&clip_count=5&instructions=...`: authenticated raw video body (not multipart), returns 202 with the same job response. Query parameters use the same defaults and validation as YouTube jobs. Invalid media returns 422, oversized files 413, and a busy backend 409. Upload jobs store the source as `source.upload` in their job directory and include `source_type: "upload"`; new YouTube jobs include `source_type: "youtube"`. Uploaded sources can be opened in the editor on Pro and Studio. Interrupted uploads are cleaned up; completed source videos and clips have no automatic expiry.
 - `GET /jobs/{id}/clips/{index}`: MP4 preview with range support; `?download=true` downloads it.
 
 Stages reflect completed work, not estimated percentages. Cutting and vertical conversion are one encoding pass. The fallback audio upload is removed from Gemini after transcription where possible; a failed remote cleanup relies on the Files API expiry. Local files remain until you manually remove an individual job directory with the backend stopped. There is no automatic disk cleanup.

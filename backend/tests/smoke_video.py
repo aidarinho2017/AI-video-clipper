@@ -14,6 +14,9 @@ def main():
         source, target = folder / "source.mp4", folder / "clip.mp4"
         run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24",
              "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "17", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(source)])
+        uploaded_source = folder / "source.upload"
+        source.replace(uploaded_source)
+        source = uploaded_source
         assert 16.9 <= probe(source) <= 17.1
         extract_audio(source, folder / "audio.m4a")
         render_waveform(source, folder / "waveform.png")

@@ -1173,6 +1173,17 @@ input::placeholder {
 .generation-settings textarea {
   resize: vertical;
 }
+
+.generation-settings input[type="file"],
+.generation-settings progress {
+  width: 100%;
+  max-width: 100%;
+}
+
+.generation-settings p {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
 .generation-settings small {
   display: block;
   margin-top: 6px;

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import LandingPage, { PricingCards, type BillingPlan } from "./LandingPage";
-import { apiRequest, clearSession, mediaUrl } from "../lib/api";
+import { apiRequest, clearSession, mediaUrl, uploadRequest } from "../lib/api";
 const STORAGE = "clipper-job";
 const stages = [
   ["downloading", "Downloading video"],
@@ -34,6 +34,7 @@ type Job = {
   clips: Clip[];
   error: string | null;
   credits?: number;
+  source_type?: "youtube" | "upload";
 };
 type Entitlements = {
   model_tiers: string[];
@@ -64,6 +65,7 @@ type ModelOption = {
 type ModelCatalog = {
   default_model: string;
   models: ModelOption[];
+  upload_limits: { max_bytes: number; min_seconds: number; max_seconds: number };
 };
 
 function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onRedeem, promoBusy, onManage, onLogout, onBack }: {
@@ -115,6 +117,10 @@ export default function Home() {
   const [promoBusy, setPromoBusy] = useState(false);
   const [billingNotice, setBillingNotice] = useState("");
   const [url, setUrl] = useState("");
+  const [sourceType, setSourceType] = useState<"youtube" | "upload">("youtube");
+  const [file, setFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadLimits, setUploadLimits] = useState<ModelCatalog["upload_limits"] | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -167,6 +173,7 @@ export default function Home() {
     apiRequest<ModelCatalog>("/ai/models")
       .then((catalog) => {
         setModels(catalog.models);
+        setUploadLimits(catalog.upload_limits);
         const defaultModel = catalog.models.find(
           (item) => item.id === catalog.default_model && item.configured,
         );
@@ -233,17 +240,22 @@ export default function Home() {
       return;
     }
     setBusy(true);
+    setUploadProgress(0);
     setError("");
     try {
-      const data = await apiRequest<Job>("/jobs", {
+      if (sourceType === "upload" && !file) throw new Error("Choose a video file.");
+      if (sourceType === "upload" && file && uploadLimits && file.size > uploadLimits.max_bytes) {
+        throw new Error("Video exceeds the upload size limit.");
+      }
+      const options = { model: activeModel, instructions, clip_length: activeClipLength, clip_count: activeClipCount };
+      const data = sourceType === "upload" && file
+        ? await uploadRequest<Job>(`/jobs/upload?${new URLSearchParams({ ...options, clip_count: String(options.clip_count) })}`, file, setUploadProgress)
+        : await apiRequest<Job>("/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           youtube_url: url,
-          model: activeModel,
-          instructions,
-          clip_length: activeClipLength,
-          clip_count: activeClipCount,
+          ...options,
         }),
       });
       localStorage.setItem(STORAGE, data.id);
@@ -373,6 +385,15 @@ export default function Home() {
             into <span>viral clips.</span>
           </h1>
           <form onSubmit={generate}>
+            <fieldset className="generation-settings" disabled={busy}>
+              <legend>Video source</legend>
+              <label htmlFor="source-type">Source</label>
+              <select id="source-type" value={sourceType} onChange={(event) => setSourceType(event.target.value as "youtube" | "upload")}>
+                <option value="youtube">YouTube</option>
+                <option value="upload">Upload video</option>
+              </select>
+            </fieldset>
+            {sourceType === "youtube" ? <>
             <label className="sr-only" htmlFor="youtube-url">
               YouTube video URL
             </label>
@@ -396,6 +417,18 @@ export default function Home() {
                 disabled={busy}
               />
             </div>
+            </> : <div className="generation-settings">
+              <label htmlFor="video-file">Video file</label>
+              <input id="video-file" type="file" accept="video/*,.mkv" required={!file} disabled={busy}
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+              {file && <p>{file.name} · {(file.size / 1024 / 1024).toFixed(1)} MiB</p>}
+              <p>Your video needs sound. Uploaded videos are transcribed before analysis.</p>
+              {uploadLimits && <p>Up to {(uploadLimits.max_bytes / 1024 ** 3).toFixed(1)} GiB · {uploadLimits.min_seconds} seconds to {Math.floor(uploadLimits.max_seconds / 60)} minutes.</p>}
+              {busy && <div role="status">
+                <progress max={100} value={uploadProgress} aria-label="Video upload progress" />
+                <p>{uploadProgress < 100 ? `Uploading… ${uploadProgress}%` : "Upload complete. Checking video…"}</p>
+              </div>}
+            </div>}
             <fieldset className="generation-settings" disabled={busy}>
               <legend>Clip settings</legend>
               <label htmlFor="ai-model">AI model</label>
@@ -460,7 +493,7 @@ export default function Home() {
               className="primary"
               disabled={busy || !allowedModels.length || (subscribed && user.credits < activeClipCount)}
             >
-              {busy ? "Starting…" : subscribed
+              {busy ? (sourceType === "upload" ? "Uploading…" : "Starting…") : subscribed
                 ? `Generate Clips · ${activeClipCount} credit${activeClipCount === 1 ? "" : "s"}`
                 : "Generate Clips"}
               <span aria-hidden="true">↗</span>
@@ -482,8 +515,8 @@ export default function Home() {
           </h1>
           <p>Finding the strongest parts of your conversation.</p>
           <ol className="stages">
-            {stages.map(([id, label], index) => {
-              const current = stages.findIndex(([s]) => s === job.stage);
+            {stages.filter(([id]) => job.source_type !== "upload" || id !== "downloading").map(([id, label], index, visibleStages) => {
+              const current = visibleStages.findIndex(([s]) => s === job.stage);
               return (
                 <li
                   key={id}

@@ -36,7 +36,7 @@ def job_source(job_id: UUID) -> Path:
     state = jobs.read(str(job_id))
     if state["status"] != "completed":
         raise PipelineError("The AI job must be completed before its source can be edited.")
-    sources = [path for path in (settings.data_dir / str(job_id)).glob("source.*") if path.suffix in {".mp4", ".mkv", ".webm"}]
+    sources = [path for path in (settings.data_dir / str(job_id)).glob("source.*") if path.suffix in {".mp4", ".mkv", ".webm", ".upload"}]
     if len(sources) != 1:
         raise PipelineError("The original source video is unavailable.")
     return sources[0]
