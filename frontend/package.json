@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start --hostname localhost",
     "lint": "eslint .",
-    "test": "node --test src/editor/editor-state.test.ts",
+    "test": "node --test src/editor/editor-state.test.ts src/lib/api.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

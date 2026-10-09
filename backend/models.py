@@ -92,6 +92,18 @@ class TranscriptResponse(BaseModel):
     segments: list[TranscriptSegment]
 
 
+class TranscriptWord(TranscriptSegment):
+    pass
+
+
+class TimedTranscript(TranscriptResponse):
+    provider: Literal["youtube", "deepgram", "gemini"]
+    words: list[TranscriptWord] = Field(default_factory=list)
+
+    def timed_text(self) -> str:
+        return "\n".join(f"[{segment.start:.2f}-{segment.end:.2f}] {segment.text}" for segment in self.segments)
+
+
 class EditorModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, str_strip_whitespace=True)
 

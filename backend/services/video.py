@@ -4,12 +4,11 @@ import math
 import re
 import signal
 import subprocess
-import textwrap
 from pathlib import Path
 
 import cv2
 
-from ..models import AudioClip, ClipCandidate, EditorExportRequest, PipelineError, VideoSegment
+from ..models import AudioClip, ClipCandidate, EditorExportRequest, PipelineError, TranscriptWord, VideoSegment
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +76,26 @@ def extract_audio(source: Path, target: Path):
 TIMED_LINE = re.compile(r"^\[(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]\s+(.+)$")
 
 
+def _caption_width(text: str) -> float:
+    # shortcut: conservative 43px English/Russian widths; remeasure if the font or supported scripts change.
+    return sum(14 if char.isspace() else 43 if char in "WMwmЖШЩЮжшщю" else
+               33 if char.isupper() else 28 for char in text)
+
+
+def _single_caption_cues(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+    # Resolve collisions at ASS centisecond precision, including identical starts.
+    by_start = {round(start * 100): (round(end * 100), text) for start, end, text in
+                sorted(cues, key=lambda cue: cue[0])}
+    ordered = sorted(by_start.items())
+    result = []
+    for index, (start, (end, text)) in enumerate(ordered):
+        if index + 1 < len(ordered):
+            end = min(end, ordered[index + 1][0])
+        if end > start:
+            result.append((start / 100, end / 100, text))
+    return result
+
+
 def _face_center(source: Path, clip: ClipCandidate) -> float:
     detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     if detector.empty():
@@ -127,7 +146,7 @@ def _caption_cues(transcript: str, clip: ClipCandidate) -> list[tuple[float, flo
             continue
         words, chunks, current = text.split(), [], []
         for word in words:
-            if current and len(" ".join(current + [word])) > 52:
+            if current and _caption_width(" ".join(current + [word])) > 580:
                 chunks.append(current)
                 current = []
             current.append(word)
@@ -137,18 +156,47 @@ def _caption_cues(transcript: str, clip: ClipCandidate) -> list[tuple[float, flo
         offset = start
         for chunk in chunks:
             chunk_end = end if chunk is chunks[-1] else offset + (end - start) * len(chunk) / total_words
-            wrapped = textwrap.wrap(" ".join(chunk), width=28, break_long_words=False)
-            cues.append((offset - clip.start, chunk_end - clip.start, "\\N".join(wrapped[:2])))
+            cues.append((offset - clip.start, chunk_end - clip.start, " ".join(chunk)))
             offset = chunk_end
-    return cues
+    return _single_caption_cues(cues)
 
 
-def _write_generated_captions(path: Path, transcript: str, clip: ClipCandidate):
+def _word_caption_cues(words: list[TranscriptWord], clip: ClipCandidate) -> list[tuple[float, float, str]]:
+    phrases, current = [], []
+    for word in words:
+        if word.end <= clip.start or word.start >= clip.end:
+            continue
+        if current and (_caption_width(" ".join(item.text for item in current + [word])) > 580 or
+                        word.start - current[-1].end > 0.5 or current[-1].text.endswith((".", "!", "?", "。"))):
+            phrases.append(current)
+            current = []
+        current.append(word)
+    if current:
+        phrases.append(current)
+    cues = []
+    for phrase in phrases:
+        start, end = max(clip.start, phrase[0].start), min(clip.end, phrase[-1].end)
+        boundaries = sorted({start, end, *(max(start, min(end, timestamp))
+                                         for word in phrase for timestamp in (word.start, word.end))})
+        for cue_start, cue_end in zip(boundaries, boundaries[1:]):
+            parts = []
+            for word in phrase:
+                separator = " " if parts else ""
+                safe = " ".join(word.text.split()).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+                if word.start <= cue_start < word.end:
+                    safe = "{\\1c&H00FFFF&}" + safe + "{\\1c&HFFFFFF&}"
+                parts.append(separator + safe)
+            cues.append((cue_start - clip.start, cue_end - clip.start, "".join(parts)))
+    return _single_caption_cues(cues)
+
+
+def _write_generated_captions(path: Path, transcript: str, clip: ClipCandidate,
+                              words: list[TranscriptWord] | None = None):
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 720
 PlayResY: 1280
-WrapStyle: 0
+WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
@@ -158,17 +206,25 @@ Style: Default,Liberation Sans,43,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
-    for start, end, text in _caption_cues(transcript, clip):
-        safe = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-        safe = safe.replace("\\\\N", "\\N")
+    cues = _word_caption_cues(words, clip) if words else _caption_cues(transcript, clip)
+    for start, end, text in cues:
+        if words:
+            safe = text
+        else:
+            safe = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+        plain = re.sub(r"\{\\1c&H[0-9A-F]+&\}", "", text) if words else text
+        width = _caption_width(plain)
+        if width > 580:
+            safe = f"{{\\fscx{max(1, math.floor(580 / width * 100))}}}" + safe
         lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{safe}")
     path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
 
 
-def render(source: Path, target: Path, clip: ClipCandidate, transcript: str):
+def render(source: Path, target: Path, clip: ClipCandidate, transcript: str,
+           words: list[TranscriptWord] | None = None):
     temporary = target.with_suffix(".partial.mp4")
     caption_file = target.with_suffix(".captions.ass")
-    _write_generated_captions(caption_file, transcript, clip)
+    _write_generated_captions(caption_file, transcript, clip, words)
     center = _face_center(source, clip)
     crop = f"crop=720:1280:max(0\\,min(iw-ow\\,iw*{center:.4f}-ow/2)):(ih-oh)/2"
     escaped = caption_file.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")

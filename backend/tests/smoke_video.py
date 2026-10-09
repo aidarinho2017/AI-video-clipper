@@ -3,7 +3,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from backend.models import ClipCandidate, EditorExportRequest
+from backend.models import ClipCandidate, EditorExportRequest, TranscriptWord
 from backend.services.video import extract_audio, probe, render, render_edit, render_waveform, run
 from backend.tests.test_pipeline import candidate
 
@@ -28,6 +28,17 @@ def main():
         stream = next(s for s in info["streams"] if s["codec_type"] == "video")
         assert (stream["width"], stream["height"], stream["codec_name"]) == (720, 1280, "h264")
         run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(target), "-f", "null", "-"])
+        highlighted = folder / "highlighted.mp4"
+        render(source, highlighted, ClipCandidate.model_validate({**candidate(1), "end": 16}), "",
+               [TranscriptWord(start=1.5, end=2.5, text="Hello,"),
+                TranscriptWord(start=2.8, end=3.8, text="привет!"),
+                TranscriptWord(start=4., end=5., text="Again")])
+        run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(highlighted), "-f", "null", "-"])
+        # Frames before/during/after the first word let us verify the burned highlight.
+        for name, timestamp in (("before", .0), ("active", 1.), ("pause", 1.6), ("russian", 2.3)):
+            frame = Path(tempfile.gettempdir()) / f"clipper-caption-{name}.png"
+            run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", str(timestamp), "-i", str(highlighted),
+                 "-frames:v", "1", str(frame)], 30)
         silent_source = folder / "silent-source.mp4"
         run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24", "-t", "6", "-c:v", "libx264", "-preset", "ultrafast", str(silent_source)])
         edited = folder / "edited.mp4"
@@ -59,7 +70,7 @@ def main():
         render_edit([(silent_source, silent_edit.segments[0])], [], silent, silent_edit)
         silent_info = json.loads(run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(silent)]))
         assert {stream["codec_type"] for stream in silent_info["streams"]} == {"video"}
-    print("FFmpeg smoke test passed: clip and multi-segment editor exports decode correctly.")
+    print("FFmpeg smoke test passed: phrase captions, highlighted English/Russian captions and editor exports decode correctly.")
 
 
 if __name__ == "__main__":

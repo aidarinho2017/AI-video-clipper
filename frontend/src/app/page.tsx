@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import LandingPage, { PricingCards, type BillingPlan } from "./LandingPage";
-import { apiRequest, clearSession, mediaUrl, uploadRequest } from "../lib/api";
+import { ApiError, apiRequest, clearSession, mediaUrl, uploadRequest } from "../lib/api";
 const STORAGE = "clipper-job";
+type RequestTarget = "account" | "plans" | "models" | "job" | "media";
 const stages = [
   ["downloading", "Downloading video"],
   ["preparing", "Preparing audio"],
+  ["transcribing", "Transcribing audio"],
   ["analyzing", "Analyzing & finding moments"],
   ["ranking", "Scoring clips"],
   ["rendering", "Cutting & preparing vertical videos"],
@@ -35,6 +37,7 @@ type Job = {
   error: string | null;
   credits?: number;
   source_type?: "youtube" | "upload";
+  transcription_provider?: "youtube" | "deepgram" | "gemini";
 };
 type Entitlements = {
   model_tiers: string[];
@@ -68,12 +71,13 @@ type ModelCatalog = {
   upload_limits: { max_bytes: number; min_seconds: number; max_seconds: number };
 };
 
-function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onRedeem, promoBusy, onManage, onLogout, onBack }: {
+function SubscriptionGate({ user, plans, busy, notice, error, alerts, onCheckout, onRedeem, promoBusy, onManage, onLogout, onBack }: {
   user: User;
   plans: BillingPlan[];
   busy: string;
   notice: string;
   error: string;
+  alerts: ReactNode;
   onCheckout: (plan: BillingPlan["id"]) => void;
   onRedeem: (code: string) => void;
   promoBusy: boolean;
@@ -99,6 +103,7 @@ function SubscriptionGate({ user, plans, busy, notice, error, onCheckout, onRede
           ? "Update your payment method in Stripe to restore access."
           : "Choose the plan that fits the clip settings you just prepared."}</p>
         {notice && <div className="billing-notice">{notice}</div>}
+        {alerts}
         {error && <div className="billing-error" role="alert">{error}</div>}
         {paymentProblem
           ? <button className="primary billing-manage" onClick={onManage}>Manage billing ↗</button>
@@ -124,8 +129,17 @@ export default function Home() {
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [billingError, setBillingError] = useState("");
+  const [requestErrors, setRequestErrors] = useState<Partial<Record<RequestTarget, { message: string; network: boolean }>>>({});
+  const [retries, setRetries] = useState({ account: 0, plans: 0, models: 0, job: 0, media: 0 });
+  const fileInput = useRef<HTMLInputElement>(null);
+  const requestError = useCallback((target: RequestTarget, reason?: Error) => {
+    setRequestErrors((current) => ({ ...current, [target]: reason ? {
+      message: reason.message.trim() || "The request failed. Please try again.",
+      network: reason instanceof ApiError && reason.status === 0,
+    } : undefined }));
+  }, []);
   const [selected, setSelected] = useState(0);
-  const [restore, setRestore] = useState(0);
   const [clipUrls, setClipUrls] = useState<Record<number, string>>({});
   const [models, setModels] = useState<ModelOption[]>([]);
   const [model, setModel] = useState("gemini-fast");
@@ -143,9 +157,24 @@ export default function Home() {
     ? clipLength : user?.entitlements.clip_lengths.at(-1) ?? clipLength) as "short" | "medium" | "long";
 
   useEffect(() => {
-    apiRequest<User>("/auth/me").then(setUser).catch(() => setUser(null));
-    apiRequest<{ plans: BillingPlan[] }>("/billing/plans").then((data) => setPlans(data.plans)).catch((err) => setError(err.message));
-  }, []);
+    let active = true;
+    apiRequest<User>("/auth/me").then((account) => {
+      if (active) { setUser(account); requestError("account"); }
+    }).catch((reason) => {
+      if (!active) return;
+      setUser(null);
+      requestError("account", reason instanceof ApiError && reason.status === 401 ? undefined : reason);
+    });
+    return () => { active = false; };
+  }, [retries.account, requestError]);
+
+  useEffect(() => {
+    let active = true;
+    apiRequest<{ plans: BillingPlan[] }>("/billing/plans").then((data) => {
+      if (active) { setPlans(data.plans); requestError("plans"); }
+    }).catch((reason) => { if (active) requestError("plans", reason); });
+    return () => { active = false; };
+  }, [retries.plans, requestError]);
 
   const subscriptionStatus = user?.subscription_status;
   useEffect(() => {
@@ -159,8 +188,9 @@ export default function Home() {
       apiRequest<User>("/auth/me").then((next) => {
         setBillingNotice("Payment completed. Waiting for Stripe to activate your subscription…");
         setUser(next);
+        setBillingError("");
         if (next.subscription_status === "active") clearInterval(timer);
-      }).catch((reason) => setError(reason.message));
+      }).catch((reason) => setBillingError(reason.message));
       if (++attempts >= 15) {
         clearInterval(timer);
         setBillingNotice("Stripe is still processing the payment. Refresh in a moment.");
@@ -170,8 +200,11 @@ export default function Home() {
   }, [subscriptionStatus]);
 
   useEffect(() => {
+    let active = true;
     apiRequest<ModelCatalog>("/ai/models")
       .then((catalog) => {
+        if (!active) return;
+        requestError("models");
         setModels(catalog.models);
         setUploadLimits(catalog.upload_limits);
         const defaultModel = catalog.models.find(
@@ -183,11 +216,13 @@ export default function Home() {
             catalog.default_model,
         );
       })
-      .catch((err) => setError(err.message));
-  }, []);
+      .catch((reason) => { if (active) requestError("models", reason); });
+    return () => { active = false; };
+  }, [retries.models, requestError]);
 
+  const userEmail = user?.email;
   useEffect(() => {
-    if (!user) return;
+    if (!userEmail) return;
     const id = localStorage.getItem(STORAGE);
     if (!id) return;
     let active = true;
@@ -196,16 +231,21 @@ export default function Home() {
         if (active) {
           setJob(data);
           setUser((current) => current && data.credits !== undefined ? { ...current, credits: data.credits } : current);
-          setError("");
+          requestError("job");
         }
       })
       .catch((err) => {
-        if (active) setError(err.message);
+        if (!active) return;
+        if (err instanceof ApiError && err.status === 404) {
+          localStorage.removeItem(STORAGE);
+          setJob(null);
+          requestError("job");
+        } else requestError("job", err);
       });
     return () => {
       active = false;
     };
-  }, [restore, user]);
+  }, [retries.job, userEmail, requestError]);
 
   const jobId = job?.id;
   const processing = job?.status === "queued" || job?.status === "processing";
@@ -219,10 +259,10 @@ export default function Home() {
         if (active) {
           setJob(data);
           setUser((current) => current && data.credits !== undefined ? { ...current, credits: data.credits } : current);
-          setError("");
+          requestError("job");
         }
       } catch (err) {
-        if (active) setError((err as Error).message);
+        if (active) requestError("job", err as Error);
       }
       if (active) timer = setTimeout(poll, 2000);
     };
@@ -231,7 +271,7 @@ export default function Home() {
       active = false;
       clearTimeout(timer);
     };
-  }, [jobId, processing]);
+  }, [jobId, processing, retries.job, requestError]);
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
@@ -260,6 +300,7 @@ export default function Home() {
       });
       localStorage.setItem(STORAGE, data.id);
       setJob(data);
+      requestError("job");
       setUser((current) => current && data.credits !== undefined ? { ...current, credits: data.credits } : current);
       setSelected(0);
     } catch (err) {
@@ -273,6 +314,8 @@ export default function Home() {
     localStorage.removeItem(STORAGE);
     setJob(null);
     setError("");
+    requestError("job");
+    requestError("media");
     setSelected(0);
     setClipUrls({});
   }
@@ -289,31 +332,31 @@ export default function Home() {
 
   async function checkout(plan: BillingPlan["id"]) {
     setBillingBusy(plan);
-    setError("");
+    setBillingError("");
     try {
       const result = await apiRequest<{ url: string }>("/billing/checkout", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan }),
       });
       window.location.assign(result.url);
     } catch (reason) {
-      setError((reason as Error).message);
+      setBillingError((reason as Error).message);
       setBillingBusy("");
     }
   }
 
   async function manageBilling() {
-    setError("");
+    setBillingError("");
     try {
       const result = await apiRequest<{ url: string }>("/billing/portal", { method: "POST" });
       window.location.assign(result.url);
     } catch (reason) {
-      setError((reason as Error).message);
+      setBillingError((reason as Error).message);
     }
   }
 
   async function redeemPromo(code: string) {
     setPromoBusy(true);
-    setError("");
+    setBillingError("");
     try {
       const account = await apiRequest<User>("/billing/promo-code", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
@@ -322,30 +365,41 @@ export default function Home() {
       setShowPricing(false);
       setBillingNotice(`Promo code applied. Your ${account.plan} plan is active.`);
     } catch (reason) {
-      setError((reason as Error).message);
+      setBillingError((reason as Error).message);
     } finally {
       setPromoBusy(false);
     }
   }
   const clip = job?.clips[selected];
+  const completedJobId = job?.status === "completed" ? job.id : undefined;
 
   useEffect(() => {
-    if (job?.status !== "completed") return;
+    if (!completedJobId) return;
     let active = true;
-    Promise.all(job.clips.map(async ({ index }) => [index,
-      await mediaUrl(`/jobs/${job.id}/clips/${index}`)] as const))
-      .then((entries) => { if (active) setClipUrls(Object.fromEntries(entries)); })
-      .catch((reason) => { if (active) setError(reason.message); });
+    const clips = job?.clips ?? [];
+    Promise.all(clips.map(async ({ index }) => [index,
+      await mediaUrl(`/jobs/${completedJobId}/clips/${index}`)] as const))
+      .then((entries) => { if (active) { setClipUrls(Object.fromEntries(entries)); requestError("media"); } })
+      .catch((reason) => { if (active) requestError("media", reason); });
     return () => { active = false; };
-  }, [job?.id, job?.status, job?.clips]);
+  }, [completedJobId, job?.clips, retries.media, requestError]);
+
+  const alerts = (Object.entries(requestErrors) as [RequestTarget, { message: string; network: boolean } | undefined][])
+    .map(([target, issue]) => issue && <div role="alert" className="error" key={target}>
+      {issue.message}
+      {issue.network && <button type="button" className="text-button"
+        onClick={() => setRetries((current) => ({ ...current, [target]: current[target] + 1 }))}>
+        Retry connection
+      </button>}
+    </div>);
 
   if (user === undefined) return <main className="shell"><p>Loading…</p></main>;
 
-  if (!user) return <LandingPage error={error} plans={plans} />;
+  if (!user) return <LandingPage error={error} alerts={alerts} plans={plans} />;
 
   const needsBillingRecovery = !["active", "inactive", "canceled"].includes(user.subscription_status);
   if (showPricing || needsBillingRecovery) return <SubscriptionGate user={user} plans={plans}
-    busy={billingBusy} notice={billingNotice} error={error} onCheckout={checkout}
+    busy={billingBusy} notice={billingNotice} error={billingError} alerts={alerts} onCheckout={checkout}
     onRedeem={redeemPromo} promoBusy={promoBusy}
     onManage={manageBilling} onLogout={logout}
     onBack={needsBillingRecovery ? undefined : () => setShowPricing(false)} />;
@@ -364,19 +418,9 @@ export default function Home() {
         {user.is_admin && <Link className="text-button" href="/admin">Admin</Link>}
         <button className="text-button" onClick={logout}>Sign out</button>
       </div>
-      {error && (
-        <div role="alert" className="error">
-          {error}{" "}
-          {!processing && (
-            <button
-              className="text-button"
-              onClick={() => setRestore((v) => v + 1)}
-            >
-              Retry connection
-            </button>
-          )}
-        </div>
-      )}
+      {alerts}
+      {error && <div role="alert" className="error">{error}</div>}
+      {billingError && <div role="alert" className="error">{billingError}</div>}
       {!job && (
         <section className="intro">
           <h1>
@@ -385,14 +429,10 @@ export default function Home() {
             into <span>viral clips.</span>
           </h1>
           <form onSubmit={generate}>
-            <fieldset className="generation-settings" disabled={busy}>
-              <legend>Video source</legend>
-              <label htmlFor="source-type">Source</label>
-              <select id="source-type" value={sourceType} onChange={(event) => setSourceType(event.target.value as "youtube" | "upload")}>
-                <option value="youtube">YouTube</option>
-                <option value="upload">Upload video</option>
-              </select>
-            </fieldset>
+            <div className="source-switch" role="group" aria-label="Video source">
+              <button type="button" aria-pressed={sourceType === "youtube"} disabled={busy} onClick={() => setSourceType("youtube")}>YouTube</button>
+              <button type="button" aria-pressed={sourceType === "upload"} disabled={busy} onClick={() => setSourceType("upload")}>Upload video</button>
+            </div>
             {sourceType === "youtube" ? <>
             <label className="sr-only" htmlFor="youtube-url">
               YouTube video URL
@@ -417,13 +457,18 @@ export default function Home() {
                 disabled={busy}
               />
             </div>
-            </> : <div className="generation-settings">
-              <label htmlFor="video-file">Video file</label>
-              <input id="video-file" type="file" accept="video/*,.mkv" required={!file} disabled={busy}
+            </> : <div className="upload-source">
+              <input ref={fileInput} id="video-file" hidden type="file" accept="video/*,.mkv" disabled={busy}
                 onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
-              {file && <p>{file.name} · {(file.size / 1024 / 1024).toFixed(1)} MiB</p>}
-              <p>Your video needs sound. Uploaded videos are transcribed before analysis.</p>
-              {uploadLimits && <p>Up to {(uploadLimits.max_bytes / 1024 ** 3).toFixed(1)} GiB · {uploadLimits.min_seconds} seconds to {Math.floor(uploadLimits.max_seconds / 60)} minutes.</p>}
+              <div className="upload-picker">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                <div className="upload-details">
+                  <strong>{file ? file.name : "Choose a video from your device"}</strong>
+                  <span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MiB` : "Upload your recording to create clips"}</span>
+                </div>
+                <button type="button" className="upload-choose" disabled={busy} onClick={() => fileInput.current?.click()}>{file ? "Replace" : "Choose video"}</button>
+              </div>
+              <p className="upload-hint">{uploadLimits && <>Up to {(uploadLimits.max_bytes / 1024 ** 3).toFixed(1)} GiB · {uploadLimits.min_seconds}s–{Math.floor(uploadLimits.max_seconds / 60)} min · </>}Video with sound</p>
               {busy && <div role="status">
                 <progress max={100} value={uploadProgress} aria-label="Video upload progress" />
                 <p>{uploadProgress < 100 ? `Uploading… ${uploadProgress}%` : "Upload complete. Checking video…"}</p>
@@ -515,7 +560,8 @@ export default function Home() {
           </h1>
           <p>Finding the strongest parts of your conversation.</p>
           <ol className="stages">
-            {stages.filter(([id]) => job.source_type !== "upload" || id !== "downloading").map(([id, label], index, visibleStages) => {
+            {stages.filter(([id]) => (job.source_type !== "upload" || id !== "downloading") &&
+              (id !== "transcribing" || job.stage === "transcribing" || job.transcription_provider === "deepgram" || job.transcription_provider === "gemini")).map(([id, label], index, visibleStages) => {
               const current = visibleStages.findIndex(([s]) => s === job.stage);
               return (
                 <li

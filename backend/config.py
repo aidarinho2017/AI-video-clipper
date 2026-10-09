@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
     gemini_api_key: SecretStr = SecretStr("")
+    deepgram_api_key: SecretStr = SecretStr("")
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
     google_client_id: str = ""

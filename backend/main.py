@@ -199,8 +199,8 @@ def check_job(body: JobOptions, user: dict):
 async def upload_job(request: Request, background: BackgroundTasks,
                      body: UploadJobOptions = Depends(), user: dict = Depends(auth.current_user)):
     check_job(body, user)
-    if not settings.gemini_api_key.get_secret_value():
-        raise HTTPException(503, "Add GEMINI_API_KEY to transcribe uploaded videos.")
+    if not (settings.deepgram_api_key.get_secret_value() or settings.gemini_api_key.get_secret_value()):
+        raise HTTPException(503, "Add DEEPGRAM_API_KEY or GEMINI_API_KEY to transcribe uploaded videos.")
     if user["credits"] < body.clip_count:
         raise HTTPException(402, "Not enough credits.")
     length = request.headers.get("content-length")

@@ -2,6 +2,15 @@ export const API = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").
 
 const SESSION = "clipper-session";
 
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export function saveSession(token: string) {
   localStorage.setItem(SESSION, token);
 }
@@ -23,13 +32,14 @@ export async function apiRequest<T>(path: string, options?: RequestInit): Promis
       signal: options?.signal ?? (options?.body instanceof Blob ? undefined : AbortSignal.timeout(15000)),
     });
   } catch {
-    throw new Error("Cannot reach the backend. Check the server connection and try again.");
+    throw new ApiError("Cannot reach the backend. Check the server connection and try again.", 0);
   }
-  const data = response.status === 204 ? undefined : await response.json();
+  const data = response.status === 204 ? undefined : await response.json().catch(() => undefined);
   if (!response.ok) {
     if (response.status === 401 && token) clearSession();
-    throw new Error(typeof data?.detail === "string" ? data.detail : "Request failed. Try again.");
+    throw new ApiError(typeof data?.detail === "string" ? data.detail : "Request failed. Try again.", response.status);
   }
+  if (response.status !== 204 && data === undefined) throw new ApiError("The server returned an invalid response. Try again.", response.status);
   return data as T;
 }
 

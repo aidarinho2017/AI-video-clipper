@@ -7,7 +7,7 @@ from uuid import uuid4
 from .. import auth
 from ..config import settings
 from ..models import PipelineError
-from . import analysis, gemini, video, youtube
+from . import analysis, transcription, video, youtube
 
 # ponytail: one process and one active job; use a durable worker queue if concurrency becomes necessary.
 lock = threading.Lock()
@@ -75,22 +75,31 @@ def process(job_id: str, url: str, model_id: str = analysis.DEFAULT_MODEL, instr
         duration = video.probe(source)
         if not 75 <= duration <= settings.max_video_seconds:
             raise PipelineError("Video duration is outside the configured limits.")
+        transcript = None
         if captions:
-            transcript = youtube.transcript(captions)
-        else:
-            if not settings.gemini_api_key.get_secret_value():
-                raise PipelineError("This video has no usable captions. Add GEMINI_API_KEY for transcription fallback.")
+            try:
+                transcript = transcription.from_text(youtube.transcript(captions), duration, "youtube")
+                transcript.words = youtube.timed_words(captions, duration)
+            except (PipelineError, ValueError):
+                log.warning("YouTube captions unusable; transcribing audio instead.")
+        if transcript is None:
             update("preparing")
             audio = folder / "audio.m4a"
             video.extract_audio(source, audio)
-            transcript = gemini.transcribe(audio, duration)
+            update("transcribing")
+            transcript = transcription.transcribe(audio, duration)
+        (folder / "transcript.json").write_text(transcript.model_dump_json(), encoding="utf-8")
+        state["transcription_provider"] = transcript.provider
         update("analyzing")
         selected, candidates = analysis.analyze(
-            transcript, duration, update, model_id, instructions, clip_length, clip_count)
+            transcript.timed_text(), duration, update, model_id, instructions, clip_length, clip_count)
         (folder / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
         update("rendering")
         for index, clip in enumerate(selected, 1):
-            video.render(source, folder / f"clip-{index}.mp4", clip, transcript)
+            if transcript.words:
+                video.render(source, folder / f"clip-{index}.mp4", clip, transcript.timed_text(), transcript.words)
+            else:
+                video.render(source, folder / f"clip-{index}.mp4", clip, transcript.timed_text())
             state["clips"].append({**clip.model_dump(), "index": index})
             state["completed_clips"] = index
             save(folder, state)

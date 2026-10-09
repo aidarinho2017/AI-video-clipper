@@ -98,8 +98,9 @@ function Step({ number, title, children }: {
   );
 }
 
-export default function LandingPage({ error, plans }: {
+export default function LandingPage({ error, alerts, plans }: {
   error?: string;
+  alerts?: ReactNode;
   plans: BillingPlan[];
 }) {
   return (
@@ -203,6 +204,7 @@ export default function LandingPage({ error, plans }: {
         <p>Try the workspace, shape your first clip, and choose a plan when you are ready to generate.</p>
         <Link className="primary landing-final-cta" href="/login">Try Clipper <span aria-hidden="true">↗</span></Link>
         {error && <p className="landing-error" role="alert">{error}</p>}
+        {alerts}
       </section>
 
       <footer className="landing-footer">

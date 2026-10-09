@@ -41,7 +41,7 @@ py start.py --check
 py start.py
 ```
 
-Edit `backend/.env` and add the keys for the providers you want: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and/or `OPENAI_API_KEY`. Gemini is the default and the transcription fallback when a video has no YouTube captions. Never put keys in the frontend. `MAX_VIDEO_SECONDS` defaults to 7200.
+Edit `backend/.env` and add the keys for the analysis providers you want: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and/or `OPENAI_API_KEY`. Gemini is the default analysis provider. Add `DEEPGRAM_API_KEY` for Nova-3 English/Russian multilingual transcription when usable YouTube captions are absent. Gemini remains the transcription fallback when Deepgram is unconfigured or fails. Never put keys in the frontend. `MAX_VIDEO_SECONDS` defaults to 7200.
 
 Create a Google OAuth 2.0 **Web application** client, add `http://localhost:3000` as an authorized JavaScript origin, then set `GOOGLE_CLIENT_ID` to its client ID. Set `AUTH_SECRET` to a random value of at least 32 characters. For HTTPS deployment, also set `AUTH_COOKIE_SECURE=true`.
 
@@ -69,15 +69,17 @@ Open http://localhost:3000. Keep the backend running while a job processes. Use 
 
 ## How it works
 
-On the generation page, choose YouTube or Upload video. File uploads are available on all paid plans with the same model, clip-count, and clip-length restrictions. Uploaded videos must contain video and audio, last 75 seconds to `MAX_VIDEO_SECONDS` (2 hours by default), and fit within `MAX_UPLOAD_BYTES` (2 GiB by default). Gemini is required to transcribe uploaded audio, even when another provider analyzes the transcript. Credits are charged only after upload validation. Uploads stream directly to the backend; test production proxy size and timeout limits before using large files.
+On the generation page, choose YouTube or Upload video. File uploads are available on all paid plans with the same model, clip-count, and clip-length restrictions. Uploaded videos must contain video and audio, last 75 seconds to `MAX_VIDEO_SECONDS` (2 hours by default), and fit within `MAX_UPLOAD_BYTES` (2 GiB by default). Deepgram or Gemini must be configured for uploaded audio transcription, independently of the chosen analysis provider. Credits are charged only after upload validation. Uploads stream directly to the backend; test production proxy size and timeout limits before using large files.
 
-Browser → FastAPI background job → yt-dlp video and timestamped captions → selected AI model → validation/ranking → face-aware crop and captioned FFmpeg render → MP4 files. If captions are unavailable, FFmpeg extracts audio and Gemini creates a timestamped transcript first.
+Browser → FastAPI background job → yt-dlp video and timestamped captions (or uploaded video) → selected AI model → validation/ranking → face-aware crop and captioned FFmpeg render → MP4 files. If captions are absent, empty or unreadable, FFmpeg extracts audio and Deepgram creates a timestamped transcript first, with Gemini fallback if configured. Deepgram is never called for usable YouTube captions. Audio is streamed from disk without automatic provider retries; Gemini fallback can add provider cost. A successful normalized transcript is saved as `transcript.json` beside the source and clips. Job responses include optional `transcription_provider` (`youtube`, `deepgram`, `gemini`) and use the `transcribing` stage for audio transcription.
+
+Generated captions use short single-line chunks with non-overlapping timings; unusually long words are horizontally scaled to fit. They highlight the active word in yellow when reliable word start/end timestamps are available. Deepgram supplies these; YouTube captions require explicit single-word offsets and durations. Captions without reliable word timings, including Gemini fallback, retain ordinary phrase captions. Highlighting preserves the spoken language, pauses and clip-relative timing. Standalone editor captions are unchanged. Existing MP4s need regeneration to pick up caption changes. Put `DEEPGRAM_API_KEY` in backend/Railway secrets only; no frontend key is needed.
 
 The standalone editor imports multiple local videos and audio files. Add sources to the timeline, split and trim clips, mix waveform-backed audio tracks with per-clip volume and fades, add crossfades, reframe for social aspect ratios, position captions directly in the preview, and export one MP4.
 
 The backend requests at least 15 moments with timestamps, titles, reasoning and scores from the selected model, scaling the candidate pool for larger batches. Every score ranges from 0 (weak/absent) to 100 (exceptional). Candidates must have finite source-relative timestamps and match the selected length range. Ranking uses virality, standalone, hook, then earliest start; the greedy selector rejects overlapping moments. One additional request is allowed when the requested count is not met. If at least one moment survives, the job returns the best available clips and reports the actual count.
 
-Virality is an editorial heuristic, not a prediction of views. Audio timestamp estimates can be imperfect, and a center crop can miss off-center speakers. There is no word alignment, face tracking, generated footage, or captions.
+Virality is an editorial heuristic, not a prediction of views. Recognition and timestamps can be imperfect, and a center crop can miss off-center speakers. Word highlighting requires reliable timestamps; there is no forced alignment, dynamic face tracking or generated footage.
 
 ## Storage and API
 
@@ -130,7 +132,7 @@ STRIPE_PRICE_STUDIO=price_...
 YOUTUBE_COOKIES_GZIP_BASE64=...
 ```
 
-Only one AI provider key is required, but Gemini is also the captionless-video transcription fallback. Generate `AUTH_SECRET` with `openssl rand -hex 32`. Keep every secret in Railway, never Netlify.
+At least one analysis provider key is required. For uploads or captionless videos, also configure `DEEPGRAM_API_KEY` or `GEMINI_API_KEY`; Gemini can serve both analysis and fallback transcription. Generate `AUTH_SECRET` with `openssl rand -hex 32`. Keep every secret in Railway, never Netlify.
 
 Railway IPs may be challenged by YouTube. Export a filtered Netscape-format cookie file from a browser session that can watch YouTube, run `gzip -c youtube-cookies-filtered.txt | base64 -w0`, and save the output as Railway secret `YOUTUBE_COOKIES_GZIP_BASE64`. Redeploy after changing it. Cookies expire and must occasionally be exported again; never commit the cookie file or encoded value.
 

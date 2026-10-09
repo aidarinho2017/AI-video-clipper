@@ -26,6 +26,7 @@ class UploadTests(unittest.TestCase):
         self.folder = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.stack.enter_context(patch.object(settings, "data_dir", self.folder))
         self.stack.enter_context(patch.object(settings, "gemini_api_key", SecretStr("test")))
+        self.stack.enter_context(patch.object(settings, "deepgram_api_key", SecretStr("")))
         self.stack.enter_context(patch.object(settings, "max_upload_bytes", 100))
         self.stack.enter_context(patch("backend.main.shutil.which", return_value="installed"))
         self.user = dict(google_sub="owner", credits=100, plan="starter", subscription_status="active")
@@ -93,7 +94,9 @@ class UploadTests(unittest.TestCase):
             source.write_bytes(b"youtube")
             return source, folder / "source.en.json3"
         self.download.side_effect = download
-        with patch("backend.services.youtube.transcript", return_value="[0-180] Speech"):
+        with patch("backend.services.youtube.transcript", return_value="[0-180] Speech"), \
+             patch.object(settings, "deepgram_api_key", SecretStr("test")), \
+             patch("backend.services.transcription.deepgram") as deepgram:
             response = self.client.post("/jobs", json={
                 "youtube_url": "https://youtu.be/dQw4w9WgXcQ", "clip_count": 1,
             })
@@ -101,6 +104,7 @@ class UploadTests(unittest.TestCase):
         state = jobs.read(response.json()["id"])
         self.assertEqual((state["status"], state["source_type"]), ("completed", "youtube"))
         self.download.assert_called_once()
+        deepgram.assert_not_called()
         self.assertFalse(jobs.lock.locked())
 
     def test_dependency_and_model_checks_precede_upload(self):
@@ -132,12 +136,38 @@ class UploadTests(unittest.TestCase):
         self.charge.assert_not_called()
 
     def test_processing_failure_refunds(self):
-        with patch("backend.services.gemini.transcribe", side_effect=PipelineError("Transcription failed")):
+        with patch.object(settings, "deepgram_api_key", SecretStr("test")), \
+             patch("backend.services.transcription.deepgram", side_effect=PipelineError("Deepgram unavailable")), \
+             patch("backend.services.gemini.transcribe", side_effect=PipelineError("Transcription failed")):
             response = self.upload()
         self.assertEqual(response.status_code, 202)
         self.assertEqual(jobs.read(response.json()["id"])["status"], "failed")
         self.refund.assert_called_once_with("owner", 1, f"job:{response.json()['id']}:refund")
         self.assertFalse(jobs.lock.locked())
+
+    def test_deepgram_upload_without_gemini_transcription(self):
+        from backend.models import TimedTranscript, TranscriptSegment, TranscriptWord
+        result = TimedTranscript(provider="deepgram", segments=[TranscriptSegment(start=0., end=2., text="Hello привет")],
+                                 words=[TranscriptWord(start=0., end=0.5, text="Hello"),
+                                        TranscriptWord(start=1., end=2., text="привет")])
+        with patch.object(settings, "deepgram_api_key", SecretStr("test")), \
+             patch.object(settings, "gemini_api_key", SecretStr("")), \
+             patch("backend.services.analysis.get_model", return_value=("Test", "anthropic", "model", "fast")), \
+             patch("backend.services.transcription.deepgram", return_value=result) as deepgram:
+            response = self.upload()
+        self.assertEqual(response.status_code, 202, response.text)
+        state = jobs.read(response.json()["id"])
+        self.assertEqual((state["status"], state["transcription_provider"]), ("completed", "deepgram"))
+        saved = self.folder / state["id"] / "transcript.json"
+        self.assertEqual(TimedTranscript.model_validate_json(saved.read_text()).words[1].text, "привет")
+        deepgram.assert_called_once()
+
+    def test_unusable_youtube_captions_transcribe_audio(self):
+        self.download.side_effect = lambda url, folder, limit: (folder / "source.mp4", folder / "bad.json3")
+        with patch("backend.services.youtube.transcript", side_effect=PipelineError("Bad captions")):
+            response = self.client.post("/jobs", json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ", "clip_count": 1})
+        state = jobs.read(response.json()["id"])
+        self.assertEqual((state["status"], state["transcription_provider"]), ("completed", "gemini"))
 
     def test_disconnect_cleans_up(self):
         async def stream():

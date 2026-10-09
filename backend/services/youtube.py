@@ -76,6 +76,34 @@ def transcript(path: Path) -> str:
     raise PipelineError("YouTube captions could not be read. Try another video.")
 
 
+def timed_words(path: Path, duration: float) -> list:
+    from ..models import TranscriptWord
+    from pydantic import ValidationError
+
+    # Offsets alone provide starts, not word ends; do not guess speech duration.
+    try:
+        words = []
+        for event in json.loads(path.read_text(encoding="utf-8"))["events"]:
+            segments = [segment for segment in event.get("segs", []) if segment.get("utf8", "").strip()]
+            if not segments:
+                continue
+            if any(len(segment["utf8"].split()) != 1 or "tOffsetMs" not in segment or
+                   "dDurationMs" not in segment for segment in segments):
+                return []
+            start = event["tStartMs"] / 1000
+            end = min(duration, start + event.get("dDurationMs", 0) / 1000)
+            for segment in segments:
+                word_start = start + segment["tOffsetMs"] / 1000
+                word_end = word_start + segment["dDurationMs"] / 1000
+                word = TranscriptWord(start=word_start, end=word_end, text=segment["utf8"])
+                if word.end > end or (words and word.start < words[-1].end):
+                    return []
+                words.append(word)
+        return words
+    except (OSError, ValueError, KeyError, TypeError, ValidationError):
+        return []
+
+
 def _cookie_args(folder: Path) -> list[str]:
     encoded = settings.youtube_cookies_gzip_base64.get_secret_value()
     if not encoded:
